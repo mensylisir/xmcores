@@ -3,6 +3,7 @@ module github.com/mensylisir/xmcores
 go 1.23.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/sftp v1.13.9

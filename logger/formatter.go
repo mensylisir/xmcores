@@ -13,74 +13,41 @@ import (
 )
 
 const (
-	resetColorCode = 0
-	// Default field separator
-	defaultFieldSeparator = " | "
-	// Default timestamp format
+	resetColorCode         = 0
+	defaultFieldSeparator  = " | "
 	defaultTimestampFormat = time.RFC3339 // "2006-01-02T15:04:05Z07:00"
 )
 
-// Formatter implements logrus.Formatter interface.
 type Formatter struct {
-	// TimestampFormat specifies the format of the timestamp. Default: time.RFC3339.
-	TimestampFormat string
-	// NoColors disables colorized output.
-	NoColors bool
-	// ForceColors forces colorized output, even if TTY is not detected (useful for some CI environments).
-	ForceColors bool
-	// DisableTimestamp disables timestamp output.
-	DisableTimestamp bool
-	// DisplayLevelName configures how log level names are displayed.
-	// - ShowAll: Show all level names (e.g., [INFO], [DEBUG]).
-	// - ShowAboveWarn: Show level names for WARN and above (ERROR, FATAL, PANIC).
-	// - ShowAboveError: Show level names for ERROR and above (FATAL, PANIC).
-	// - HideAll: Never show level names.
-	DisplayLevelName LevelNameDisplayMode
-	// ShowFullLevel shows the full level name (e.g., "WARNING") instead of a shortened version (e.g., "WARN").
-	ShowFullLevel bool
-	// NoUppercaseLevel prevents uppercasing of the level name.
-	NoUppercaseLevel bool
-	// HideKeys hides field keys, showing only field values (e.g., "[fieldValue]" instead of "[fieldKey:fieldValue]").
-	HideKeys bool
-	// FieldsDisplayWithOrder specifies a list of field keys to display in a specific order.
-	// Fields not in this list will be appended alphabetically after the ordered fields.
-	// If nil or empty, all fields are displayed alphabetically.
+	TimestampFormat        string
+	NoColors               bool
+	ForceColors            bool
+	DisableTimestamp       bool
+	DisplayLevelName       LevelNameDisplayMode
+	ShowFullLevel          bool
+	NoUppercaseLevel       bool
+	HideKeys               bool
 	FieldsDisplayWithOrder []string
-	// FieldSeparator defines the separator string used between fields. Default: " | ".
-	FieldSeparator string
-	// CallerFirst places caller information (if available) before the log level and message.
-	CallerFirst bool
-	// DisableCaller disables caller information output.
-	DisableCaller bool
-	// CustomCallerFormatter allows a custom function to format caller information.
-	CustomCallerFormatter func(*runtime.Frame) string
-	// MaxFieldValueLength specifies the maximum length for a field value string. Longer values will be truncated.
-	// 0 means no truncation.
-	MaxFieldValueLength int
-	// Prettyfier can be used to pretty-print field values, e.g., for structs or complex types.
-	// If set, it overrides default value formatting.
-	Prettyfier func(key string, value interface{}) string
+	FieldSeparator         string
+	CallerFirst            bool
+	DisableCaller          bool
+	CustomCallerFormatter  func(*runtime.Frame) string
+	MaxFieldValueLength    int
+	Prettyfier             func(key string, value interface{}) string
 }
 
-// LevelNameDisplayMode defines how log level names are displayed.
 type LevelNameDisplayMode int
 
 const (
-	// ShowAll shows all level names.
 	ShowAll LevelNameDisplayMode = iota
-	// ShowAboveWarn shows level names for WARN, ERROR, FATAL, PANIC.
 	ShowAboveWarn
-	// ShowAboveError shows level names for ERROR, FATAL, PANIC.
 	ShowAboveError
-	// HideAll hides all level names.
 	HideAll
 )
 
-// Format formats the log entry.
 func (f *Formatter) Format(entry *logrus.Entry) ([]byte, error) {
 	b := &bytes.Buffer{}
 
-	// Timestamp
 	if !f.DisableTimestamp {
 		timestampFormat := f.TimestampFormat
 		if timestampFormat == "" {
@@ -90,7 +57,6 @@ func (f *Formatter) Format(entry *logrus.Entry) ([]byte, error) {
 		b.WriteString(" ")
 	}
 
-	// Caller info (if CallerFirst)
 	if f.CallerFirst && !f.DisableCaller {
 		f.writeCaller(b, entry)
 		if entry.HasCaller() {
@@ -98,7 +64,6 @@ func (f *Formatter) Format(entry *logrus.Entry) ([]byte, error) {
 		}
 	}
 
-	// Level
 	showLevelName := false
 	switch f.DisplayLevelName {
 	case ShowAll:
@@ -138,15 +103,14 @@ func (f *Formatter) Format(entry *logrus.Entry) ([]byte, error) {
 			levelStr = strings.ToUpper(levelStr)
 		}
 
-		fmt.Fprintf(b, "[%s]", levelStr) // Removed trailing space, add one after color reset or if no level
+		fmt.Fprintf(b, "[%s]", levelStr)
 
 		if useColors {
 			fmt.Fprintf(b, "\x1b[%dm", resetColorCode)
 		}
-		b.WriteString(" ") // Space after level (or where level would be)
+		b.WriteString(" ")
 	}
 
-	// Fields
 	fieldSeparator := f.FieldSeparator
 	if fieldSeparator == "" {
 		fieldSeparator = defaultFieldSeparator
@@ -162,19 +126,12 @@ func (f *Formatter) Format(entry *logrus.Entry) ([]byte, error) {
 		b.WriteString("] ")
 	}
 
-	// Message
 	b.WriteString(entry.Message)
 
-	// Caller info (if not CallerFirst and not disabled)
 	if !f.CallerFirst && !f.DisableCaller && entry.HasCaller() {
 		b.WriteString(" ")
 		f.writeCaller(b, entry)
 	}
-
-	// Final color reset if colors were used and not reset by level display
-	// This is more of a safeguard if the last colored element wasn't the level.
-	// However, current logic resets after level. If message or fields were colored, this would be needed.
-	// For now, assuming only level is colored.
 
 	b.WriteByte('\n')
 	return b.Bytes(), nil
@@ -257,8 +214,7 @@ func (f *Formatter) writeCaller(b *bytes.Buffer, entry *logrus.Entry) {
 		fmt.Fprint(b, f.CustomCallerFormatter(entry.Caller))
 	} else {
 		callerFile := filepath.Base(entry.Caller.File)
-		callerFunc := filepath.Base(entry.Caller.Function) // Show only function name
-		// Remove package path from function name for even more conciseness if desired
+		callerFunc := filepath.Base(entry.Caller.Function)
 		if parts := strings.Split(callerFunc, "."); len(parts) > 1 {
 			callerFunc = parts[len(parts)-1]
 		}
@@ -266,7 +222,6 @@ func (f *Formatter) writeCaller(b *bytes.Buffer, entry *logrus.Entry) {
 	}
 }
 
-// getColorByLevel remains the same
 func getColorByLevel(level logrus.Level) int {
 	switch level {
 	case logrus.TraceLevel:
@@ -282,7 +237,6 @@ func getColorByLevel(level logrus.Level) int {
 	}
 }
 
-// Color constants remain the same
 const (
 	colorRed    = 31
 	colorYellow = 33
@@ -290,22 +244,16 @@ const (
 	colorGray   = 37
 )
 
-// Example Prettyfier function
 func JSONPrettyfier(key string, value interface{}) string {
-	// For specific keys or types, you might want different pretty printing.
-	// This is a generic JSON marshaller for complex types.
-	if _, ok := value.(string); ok { // Avoid JSON marshalling simple strings
+	if _, ok := value.(string); ok {
 		return fmt.Sprintf("%v", value)
 	}
-	if _, ok := value.(fmt.Stringer); ok { // Use String() method if available
+	if _, ok := value.(fmt.Stringer); ok {
 		return fmt.Sprintf("%v", value)
 	}
-
-	// Attempt to marshal complex types as JSON
-	// Be careful with types that might cause marshalling errors or have sensitive data.
-	bytes, err := json.Marshal(value)
+	bytesVar, err := json.Marshal(value)
 	if err == nil {
-		return string(bytes)
+		return string(bytesVar)
 	}
-	return fmt.Sprintf("%+v", value) // Fallback to Go's default detailed print
+	return fmt.Sprintf("%+v", value)
 }

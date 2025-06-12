@@ -3,7 +3,6 @@ package logger
 
 import (
 	"fmt"
-	"io" // Required for io.Discard
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,19 +12,45 @@ import (
 	"github.com/rifflock/lfshook"
 	"github.com/sirupsen/logrus"
 
-	"github.com/mensylisir/xmcores/common" // Your actual common package path
+	"github.com/mensylisir/xmcores/common"
 )
 
-// Log is the global logger instance of XMLog.
 var Log *XMLog
 
-// XMLog wraps logrus.FieldLogger for application-specific logging.
 type XMLog struct {
-	*logrus.Logger // Embed *logrus.Logger directly for direct access to all its methods
+	*logrus.Logger
 }
 
-// InitGlobalLogger initializes the global Log variable.
-func InitGlobalLogger(outputPath string, verbose bool, defaultLevel logrus.Level) error {
+func init() {
+	defaultOutputPath := os.Getenv("XM_LOG_OUTPUT_PATH")
+	defaultVerbose := os.Getenv("XM_LOG_VERBOSE") == "true"
+	defaultLevelStr := os.Getenv("XM_LOG_LEVEL")
+
+	var logLevel logrus.Level
+	var err error
+	if defaultLevelStr != "" {
+		logLevel, err = logrus.ParseLevel(defaultLevelStr)
+		if err != nil {
+			logLevel = logrus.InfoLevel
+			fmt.Fprintf(os.Stderr, "Warning: Invalid XM_LOG_LEVEL '%s', defaulting to 'info'. Error: %v\n", defaultLevelStr, err)
+		}
+	} else {
+		logLevel = logrus.InfoLevel
+	}
+
+	err = initializeGlobalLogger(defaultOutputPath, defaultVerbose, logLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: Failed to initialize global logger: %v\n", err)
+		fallbackLogger := logrus.New()
+		fallbackLogger.SetOutput(os.Stderr)
+		fallbackLogger.SetFormatter(&logrus.TextFormatter{})
+		fallbackLogger.SetLevel(logrus.InfoLevel)
+		Log = &XMLog{Logger: fallbackLogger}
+		Log.Errorf("Global logger initialization failed: %v. Using fallback stderr logger.", err)
+	}
+}
+
+func initializeGlobalLogger(outputPath string, verbose bool, defaultLevel logrus.Level) error {
 	logger := logrus.New()
 
 	currentLogLevel := defaultLevel
@@ -33,7 +58,7 @@ func InitGlobalLogger(outputPath string, verbose bool, defaultLevel logrus.Level
 		currentLogLevel = logrus.DebugLevel
 	}
 	logger.SetLevel(currentLogLevel)
-	logger.SetReportCaller(true) // Enable caller reporting
+	logger.SetReportCaller(true)
 
 	formatterDisplayLevelConfig := ShowAboveWarn
 	if verbose {
@@ -44,15 +69,30 @@ func InitGlobalLogger(outputPath string, verbose bool, defaultLevel logrus.Level
 		common.PipelineName, common.ModuleName, common.TaskName, common.StepName, common.NodeName,
 	}
 
+	consoleFormatter := &Formatter{
+		TimestampFormat:        "2006-01-02 15:04:05",
+		NoColors:               false,
+		ForceColors:            true,
+		DisplayLevelName:       formatterDisplayLevelConfig,
+		FieldsDisplayWithOrder: defaultFieldsOrder,
+		FieldSeparator:         defaultFieldSeparator,
+		DisableCaller:          false,
+		CustomCallerFormatter: func(frame *runtime.Frame) string {
+			return fmt.Sprintf(" [%s:%d %s]", filepath.Base(frame.File), frame.Line, filepath.Base(frame.Function))
+		},
+		Prettyfier: JSONPrettyfier,
+	}
+	logger.SetFormatter(consoleFormatter)
+	logger.SetOutput(os.Stdout)
+
 	if outputPath != "" {
-		// Ensure output path exists
 		if err := os.MkdirAll(outputPath, 0755); err != nil {
 			return fmt.Errorf("failed to create log output directory %s: %w", outputPath, err)
 		}
 		logFilePath := filepath.Join(outputPath, "app.log")
 
 		writer, err := rotatelogs.New(
-			logFilePath+".%Y%m%d", // Daily rotation
+			logFilePath+".%Y%m%d",
 			rotatelogs.WithLinkName(logFilePath),
 			rotatelogs.WithMaxAge(7*24*time.Hour),
 			rotatelogs.WithRotationTime(24*time.Hour),
@@ -66,13 +106,13 @@ func InitGlobalLogger(outputPath string, verbose bool, defaultLevel logrus.Level
 			NoColors:               true,
 			DisplayLevelName:       formatterDisplayLevelConfig,
 			FieldsDisplayWithOrder: defaultFieldsOrder,
-			FieldSeparator:         " | ",
+			FieldSeparator:         defaultFieldSeparator,
 			DisableCaller:          false,
 			CustomCallerFormatter: func(frame *runtime.Frame) string {
 				return fmt.Sprintf(" [%s:%d %s]", filepath.Base(frame.File), frame.Line, filepath.Base(frame.Function))
 			},
+			Prettyfier: JSONPrettyfier,
 		}
-		logger.SetFormatter(fileFormatter) // Set formatter for the logger instance
 
 		logWriters := lfshook.WriterMap{}
 		for _, level := range logrus.AllLevels {
@@ -80,26 +120,12 @@ func InitGlobalLogger(outputPath string, verbose bool, defaultLevel logrus.Level
 				logWriters[level] = writer
 			}
 		}
+
 		if len(logWriters) > 0 {
 			logger.Hooks.Add(lfshook.NewHook(logWriters, fileFormatter))
-			// **CRITICAL FIX for empty files in test:**
-			// Discard logrus's default output when file logging is handled by a hook.
-			// This prevents potential race conditions or issues where the default output stream
-			// (e.g., os.Stderr) might not be flushed properly or quickly enough in tests,
-			// especially if the hook is also writing to the same underlying file descriptor indirectly.
-			logger.SetOutput(io.Discard)
+		} else {
+			logger.Warn("File logging for global logger configured, but no log levels seem enabled for the file hook.")
 		}
-	} else {
-		// Configure for console output
-		consoleFormatter := &Formatter{
-			TimestampFormat:        "15:04:05",
-			NoColors:               false, // Enable colors for console
-			DisplayLevelName:       formatterDisplayLevelConfig,
-			DisableCaller:          true, // Caller info often too verbose for console
-			FieldsDisplayWithOrder: defaultFieldsOrder,
-		}
-		logger.SetFormatter(consoleFormatter)
-		logger.SetOutput(os.Stdout) // Default to Stdout for console logs
 	}
 
 	Log = &XMLog{
@@ -108,8 +134,7 @@ func InitGlobalLogger(outputPath string, verbose bool, defaultLevel logrus.Level
 	return nil
 }
 
-// NewXMLog creates a new instance of XMLog.
-func NewXMLog(outputPath string, verbose bool, defaultLevel logrus.Level, forConsole bool) (*XMLog, error) {
+func NewXMLog(outputPath string, verbose bool, defaultLevel logrus.Level) (*XMLog, error) {
 	logger := logrus.New()
 	currentLogLevel := defaultLevel
 	if verbose {
@@ -127,26 +152,31 @@ func NewXMLog(outputPath string, verbose bool, defaultLevel logrus.Level, forCon
 		common.PipelineName, common.ModuleName, common.TaskName, common.StepName, common.NodeName,
 	}
 
-	var chosenFormatter *Formatter // Use pointer to share Formatter struct
-	if forConsole {
-		chosenFormatter = &Formatter{
-			TimestampFormat:        "15:04:05",
-			NoColors:               false,
-			DisplayLevelName:       formatterDisplayLevelConfig,
-			DisableCaller:          true,
-			FieldsDisplayWithOrder: defaultFieldsOrder,
-		}
-		logger.SetOutput(os.Stdout)
-		logger.SetFormatter(chosenFormatter)
-	} else if outputPath != "" {
+	consoleFormatter := &Formatter{
+		TimestampFormat:        "2006-01-02 15:04:05",
+		NoColors:               false,
+		ForceColors:            true,
+		DisplayLevelName:       formatterDisplayLevelConfig,
+		FieldsDisplayWithOrder: defaultFieldsOrder,
+		FieldSeparator:         defaultFieldSeparator,
+		DisableCaller:          false,
+		CustomCallerFormatter: func(frame *runtime.Frame) string {
+			return fmt.Sprintf(" [%s:%d %s]", filepath.Base(frame.File), frame.Line, filepath.Base(frame.Function))
+		},
+	}
+	logger.SetFormatter(consoleFormatter)
+	logger.SetOutput(os.Stdout)
+
+	if outputPath != "" {
 		if err := os.MkdirAll(outputPath, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create log output directory %s: %w", outputPath, err)
 		}
-		logFilePath := filepath.Join(outputPath, "instance.log") // Different name for instance log
+		logFilePath := filepath.Join(outputPath, "instance.log") // 给实例日志一个不同的名字
 		writer, err := rotatelogs.New(
 			logFilePath+".%Y%m%d",
 			rotatelogs.WithLinkName(logFilePath),
 			rotatelogs.WithRotationTime(24*time.Hour),
+			rotatelogs.WithMaxAge(3*24*time.Hour), // 实例日志可以设置不同的保留时间
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize rotatelogs for instance: %w", err)
@@ -156,10 +186,12 @@ func NewXMLog(outputPath string, verbose bool, defaultLevel logrus.Level, forCon
 			NoColors:               true,
 			DisplayLevelName:       formatterDisplayLevelConfig,
 			FieldsDisplayWithOrder: defaultFieldsOrder,
+			FieldSeparator:         defaultFieldSeparator,
 			DisableCaller:          false,
+			CustomCallerFormatter: func(frame *runtime.Frame) string { // 确保为文件格式化器也设置这个
+				return fmt.Sprintf(" [%s:%d %s]", filepath.Base(frame.File), frame.Line, filepath.Base(frame.Function))
+			},
 		}
-		chosenFormatter = fileFormatter
-		logger.SetFormatter(chosenFormatter) // Set formatter for the logger instance
 
 		logWriters := lfshook.WriterMap{}
 		for _, level := range logrus.AllLevels {
@@ -169,23 +201,14 @@ func NewXMLog(outputPath string, verbose bool, defaultLevel logrus.Level, forCon
 		}
 		if len(logWriters) > 0 {
 			logger.Hooks.Add(lfshook.NewHook(logWriters, fileFormatter))
-			logger.SetOutput(io.Discard) // Discard default output, rely on hook
+		} else {
+			logger.Warn("File logging for new XMLog instance configured, but no log levels seem enabled for the file hook.")
 		}
-	} else {
-		// Default to a simple console logger if no output path and not explicitly for console
-		chosenFormatter = &Formatter{
-			NoColors:               false,
-			DisplayLevelName:       ShowAll, // Show all levels for a basic default console
-			FieldsDisplayWithOrder: defaultFieldsOrder,
-		}
-		logger.SetFormatter(chosenFormatter)
-		logger.SetOutput(os.Stdout)
 	}
 
 	return &XMLog{Logger: logger}, nil
 }
 
-// --- Internal Helper Methods ---
 func (xl *XMLog) logWithStandardFields(level logrus.Level, fixedFields logrus.Fields, message string, dynamicFields ...logrus.Fields) {
 	entry := xl.Logger.WithFields(fixedFields)
 	if len(dynamicFields) > 0 && dynamicFields[0] != nil {
@@ -236,7 +259,6 @@ func (xl *XMLog) logfWithStandardFields(level logrus.Level, fixedFields logrus.F
 	}
 }
 
-// --- Pipeline Context Logging ---
 func (xl *XMLog) TracePipeline(pipelineName string, message string, dynamicFields ...logrus.Fields) {
 	xl.logWithStandardFields(logrus.TraceLevel, logrus.Fields{common.PipelineName: pipelineName}, message, dynamicFields...)
 }
@@ -304,7 +326,6 @@ func (xl *XMLog) PanicfPipeline(pipelineName string, err error, format string, a
 	xl.logfWithStandardFields(logrus.PanicLevel, fixedFields, format, args)
 }
 
-// --- Module Context Logging ---
 func (xl *XMLog) TraceModule(moduleName string, message string, dynamicFields ...logrus.Fields) {
 	xl.logWithStandardFields(logrus.TraceLevel, logrus.Fields{common.ModuleName: moduleName}, message, dynamicFields...)
 }
@@ -440,7 +461,6 @@ func (xl *XMLog) PanicfTask(taskName string, err error, format string, args ...i
 	xl.logfWithStandardFields(logrus.PanicLevel, fixedFields, format, args)
 }
 
-// --- Step Context Logging ---
 func (xl *XMLog) TraceStep(stepName string, message string, dynamicFields ...logrus.Fields) {
 	xl.logWithStandardFields(logrus.TraceLevel, logrus.Fields{common.StepName: stepName}, message, dynamicFields...)
 }
@@ -508,7 +528,6 @@ func (xl *XMLog) PanicfStep(stepName string, err error, format string, args ...i
 	xl.logfWithStandardFields(logrus.PanicLevel, fixedFields, format, args)
 }
 
-// --- Node Context Logging ---
 func (xl *XMLog) TraceNode(nodeName string, message string, dynamicFields ...logrus.Fields) {
 	xl.logWithStandardFields(logrus.TraceLevel, logrus.Fields{common.NodeName: nodeName}, message, dynamicFields...)
 }
@@ -576,43 +595,34 @@ func (xl *XMLog) PanicfNode(nodeName string, err error, format string, args ...i
 	xl.logfWithStandardFields(logrus.PanicLevel, fixedFields, format, args)
 }
 
-// --- General Purpose Structured Log with Level ---
-// Debug logs a message at level Debug on the standard logger.
 func (xl *XMLog) Debug(args ...interface{}) {
 	xl.Logger.Debug(args...)
 }
 
-// Debugf logs a formatted message at level Debug on the standard logger.
 func (xl *XMLog) Debugf(format string, args ...interface{}) {
 	xl.Logger.Debugf(format, args...)
 }
 
-// Info logs a message at level Info on the standard logger.
 func (xl *XMLog) Info(args ...interface{}) {
 	xl.Logger.Info(args...)
 }
 
-// Infof logs a formatted message at level Info on the standard logger.
 func (xl *XMLog) Infof(format string, args ...interface{}) {
 	xl.Logger.Infof(format, args...)
 }
 
-// Warn logs a message at level Warn on the standard logger.
 func (xl *XMLog) Warn(args ...interface{}) {
 	xl.Logger.Warn(args...)
 }
 
-// Warnf logs a formatted message at level Warn on the standard logger.
 func (xl *XMLog) Warnf(format string, args ...interface{}) {
 	xl.Logger.Warnf(format, args...)
 }
 
-// Error logs a message at level Error on the standard logger.
 func (xl *XMLog) Error(args ...interface{}) {
 	xl.Logger.Error(args...)
 }
 
-// Errorf logs a formatted message at level Error on the standard logger.
 func (xl *XMLog) Errorf(format string, args ...interface{}) {
 	xl.Logger.Errorf(format, args...)
 }
@@ -622,87 +632,50 @@ func (xl *XMLog) Fatal(args ...interface{}) {
 	xl.Logger.Fatal(args...)
 }
 
-// Fatalf logs a formatted message at level Fatal on the standard logger then the process will exit.
 func (xl *XMLog) Fatalf(format string, args ...interface{}) {
 	xl.Logger.Fatalf(format, args...)
 }
 
-// Panic logs a message at level Panic on the standard logger then the process will panic.
 func (xl *XMLog) Panic(args ...interface{}) {
 	xl.Logger.Panic(args...)
 }
 
-// Panicf logs a formatted message at level Panic on the standard logger then the process will panic.
 func (xl *XMLog) Panicf(format string, args ...interface{}) {
 	xl.Logger.Panicf(format, args...)
 }
 
-// Trace logs a message at level Trace on the standard logger.
 func (xl *XMLog) Trace(args ...interface{}) {
 	xl.Logger.Trace(args...)
 }
 
-// Tracef logs a formatted message at level Trace on the standard logger.
 func (xl *XMLog) Tracef(format string, args ...interface{}) {
 	xl.Logger.Tracef(format, args...)
 }
 
-// Print logs a message at the Print level (typically Info).
 func (xl *XMLog) Print(args ...interface{}) {
 	xl.Logger.Print(args...)
 }
 
-// Printf logs a formatted message at the Print level.
 func (xl *XMLog) Printf(format string, args ...interface{}) {
 	xl.Logger.Printf(format, args...)
 }
 
-// Println logs a message at the Print level, adding a newline.
 func (xl *XMLog) Println(args ...interface{}) {
 	xl.Logger.Println(args...)
 }
 
-// LogAtLevel provides a general way to log with a specific level, message, and fields.
 func (xl *XMLog) LogAtLevel(level logrus.Level, message string, fields logrus.Fields) {
 	xl.WithFields(fields).Log(level, message)
 }
 
-// LogfAtLevel provides a general way to log a formatted message with a specific level and fields.
 func (xl *XMLog) LogfAtLevel(level logrus.Level, fields logrus.Fields, format string, args ...interface{}) {
 	xl.WithFields(fields).Logf(level, format, args...)
 }
 
-// --- Deprecated/Original Methods (can be removed if new ones are adopted) ---
-
-// Message logs a structured message with a "node" field (Info level).
-// Deprecated: Use InfoNode instead for clarity.
 func (xl *XMLog) Message(node, str string) {
 	xl.InfoNode(node, str) // Calls the new InfoNode
 }
 
-// Messagef logs a structured, formatted message with a "node" field (Info level).
-// Deprecated: Use InfofNode instead for clarity.
 func (xl *XMLog) Messagef(node, format string, args ...interface{}) {
 	xl.InfofNode(node, format, args...) // Calls the new InfofNode
 }
-
-// InfoWithPipeline was an example, now superseded by full set of Pipeline methods.
-// func (xl *XMLog) InfoWithPipeline(pipelineName string, message string, fields ...map[string]interface{}) {
-// 	entry := xl.WithField(common.PipelineName, pipelineName)
-// 	if len(fields) > 0 && fields[0] != nil {
-// 		entry = entry.WithFields(fields[0]) // Note: logrus.Fields is map[string]interface{}
-// 	}
-// 	entry.Info(message)
-// }
-
-// ErrorWithTask was an example, now superseded by full set of Task methods.
-// func (xl *XMLog) ErrorWithTask(taskName string, err error, message string, fields ...map[string]interface{}) {
-// 	entry := xl.WithFields(logrus.Fields{
-// 		common.TaskName: taskName,
-// 		"error":         err,
-// 	})
-// 	if len(fields) > 0 && fields[0] != nil {
-// 		entry = entry.WithFields(fields[0])
-// 	}
-// 	entry.Error(message)
-// }

@@ -3,6 +3,7 @@ package util
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -384,4 +385,12 @@ func WriteStringToFile(filePath string, content string, perm fs.FileMode) error 
 		return errors.Wrapf(err, "failed to write to file %s", filePath)
 	}
 	return nil
+}
+
+func IsErrPipeClosed(err error) bool {
+	return errors.Is(err, os.ErrClosed) || // For os.Pipe
+		errors.Is(err, io.ErrClosedPipe) || // For io.Pipe
+		errors.Is(err, io.EOF) || // Often signals closed pipe from reader's perspective
+		(err != nil && strings.Contains(err.Error(), "file already closed")) ||
+		(err != nil && strings.Contains(err.Error(), "pipe already closed"))
 }
