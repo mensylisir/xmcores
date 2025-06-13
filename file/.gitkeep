@@ -1,0 +1,2 @@
+# This file ensures the 'file' directory is tracked by Git.
+# File manipulation utilities (e.g., templating, remote file operations) will be placed here.

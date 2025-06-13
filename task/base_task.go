@@ -11,6 +11,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// StepExecutionResult holds the outcome of a single step's execution.
+type StepExecutionResult struct {
+	StepName string
+	Success  bool
+	Error    error
+	Output   string // Optional: To store primary output for summary
+}
+
 // BaseTask provides a basic implementation for the Task interface.
 // It can be embedded in concrete task implementations.
 type BaseTask struct {
@@ -105,7 +113,7 @@ func (bt *BaseTask) Execute(rt runtime.Runtime, log *logrus.Entry) error {
 	}
 
 	var overallTaskFailed bool
-	var stepErrors []string
+	stepResults := make([]StepExecutionResult, 0, len(bt.steps))
 
 	for i, currentStep := range bt.steps {
 		stepLog := log.WithFields(logrus.Fields{
@@ -113,59 +121,87 @@ func (bt *BaseTask) Execute(rt runtime.Runtime, log *logrus.Entry) error {
 			"step_index":            fmt.Sprintf("%d/%d", i+1, len(bt.steps)),
 		})
 		stepLog.Infof("Executing step: %s (%s)", currentStep.Name(), currentStep.Description())
-		// Standard output for user visibility (as per issue requirement)
 		fmt.Printf("===> Executing Step: %s (%s)\n", currentStep.Name(), currentStep.Description())
-
 
 		stepOutput, stepSuccess, stepErr := currentStep.Execute(rt, stepLog)
 
 		if stepOutput != "" {
-			// Log the detailed output from the step, which might include stdout/stderr of commands
 			stepLog.Debugf("Step execution output:\n%s", stepOutput)
 		}
 
-		// Call Post for the current step, regardless of its success/failure
+		// Call Post for the current step, regardless of its success/failure from Execute
 		postLog := stepLog.WithField("sub_phase", "post_execute")
-		if postErr := currentStep.Post(rt, postLog, stepErr); postErr != nil {
-			postLog.Errorf("Error during Post-Execute for step %s: %v", currentStep.Name(), postErr)
-			// This error might also contribute to overall task failure if critical
-			stepErrors = append(stepErrors, fmt.Sprintf("post-execute error for step %s: %v", currentStep.Name(), postErr))
-			overallTaskFailed = true
-		}
+		postErr := currentStep.Post(rt, postLog, stepErr) // Pass Execute's error to Post
+
+		currentStepSuccess := stepSuccess && stepErr == nil && postErr == nil
+		var combinedErr error
+		errorMessages := []string{}
 
 		if stepErr != nil {
-			stepLog.Errorf("Step %s failed: %v", currentStep.Name(), stepErr)
-			fmt.Printf("===> Step FAILED: %s. Error: %v\n", currentStep.Name(), stepErr) // User visibility
-			stepErrors = append(stepErrors, fmt.Sprintf("step %s error: %v", currentStep.Name(), stepErr))
+			errorMessages = append(errorMessages, stepErr.Error())
+		}
+		if postErr != nil {
+			postLog.Errorf("Error during Post-Execute for step %s: %v", currentStep.Name(), postErr)
+			errorMessages = append(errorMessages, fmt.Sprintf("post-execute error: %v", postErr))
+		}
+
+		if len(errorMessages) > 0 {
+			combinedErr = fmt.Errorf(strings.Join(errorMessages, "; "))
+		}
+
+		stepResults = append(stepResults, StepExecutionResult{
+			StepName: currentStep.Name(),
+			Success:  currentStepSuccess,
+			Error:    combinedErr,
+			Output:   stepOutput, // Or a summary if needed
+		})
+
+		if !currentStepSuccess {
 			overallTaskFailed = true
-			if !rt.IgnoreError() {
-				log.Errorf("Task %s failed at step %s due to error: %v. Halting task execution.", bt.Name(), currentStep.Name(), stepErr)
-				return fmt.Errorf("task %s failed at step %s: %w", bt.Name(), currentStep.Name(), stepErr)
-			}
-			log.Warnf("Step %s failed but IgnoreError is true. Continuing task execution.", currentStep.Name())
-		} else if !stepSuccess {
-			stepLog.Warnf("Step %s completed but reported not successful (no error returned). Output: %s", currentStep.Name(), stepOutput)
-			fmt.Printf("===> Step COMPLETED (Reported Not Successful): %s.\n", currentStep.Name()) // User visibility
-			// This case might also be considered a failure depending on strictness.
-			// For now, if no explicit error, we treat it as a warning unless IgnoreError is false.
-			// If it's a failure, overallTaskFailed should be true.
-			// Let's assume stepSuccess=false without an error means a soft failure or warning.
-			// To make it a hard failure:
-			// overallTaskFailed = true
-			// stepErrors = append(stepErrors, fmt.Sprintf("step %s reported not successful", currentStep.Name()))
-			// if !rt.IgnoreError() { ... return ... }
+			stepLog.Errorf("Step %s determined as FAILED. Success: %v, CombinedError: %v", currentStep.Name(), currentStepSuccess, combinedErr)
+			// User visibility message is now part of the summary
 		} else {
-			stepLog.Infof("Step %s completed successfully.", currentStep.Name())
-			fmt.Printf("===> Step SUCCEEDED: %s.\n", currentStep.Name()) // User visibility
+			stepLog.Infof("Step %s determined as SUCCEEDED.", currentStep.Name())
+			// User visibility message is now part of the summary
 		}
 	}
 
+	// Print Summary Report
+	fmt.Printf("\n--- Task Execution Summary for '%s' ---\n", bt.Name())
+	log.Info("--- Task Execution Summary ---") // Log summary start as well
+	for _, result := range stepResults {
+		status := "SUCCEEDED"
+		errMsg := ""
+		if !result.Success {
+			status = "FAILED"
+			if result.Error != nil {
+				errMsg = fmt.Sprintf(" (Error: %v)", result.Error)
+			} else {
+				errMsg = " (Reason: reported not successful)" // Should ideally have an error if !Success
+			}
+		}
+		summaryLine := fmt.Sprintf("Step '%s': %s%s", result.StepName, status, errMsg)
+		fmt.Println(summaryLine)
+		if result.Success {
+			log.Infof(summaryLine)
+		} else {
+			log.Errorf(summaryLine)
+		}
+	}
+	fmt.Println("------------------------------------")
+	log.Info("------------------------------------")
+
+
 	if overallTaskFailed {
-		log.Errorf("Task %s completed with one or more errors: %s", bt.Name(), strings.Join(stepErrors, "; "))
-		return fmt.Errorf("task %s failed with errors: %s", bt.Name(), strings.Join(stepErrors, "; "))
+		log.Errorf("Task '%s' completed with one or more errors.", bt.Name())
+		if !rt.IgnoreError() {
+			return fmt.Errorf("task '%s' completed with one or more errors. See summary above for details.", bt.Name())
+		}
+		log.Warnf("Task '%s' had errors, but IgnoreError is true. Overall task considered non-failed due to IgnoreError.", bt.Name())
+		return nil // Return nil because errors are being ignored at the task level
 	}
 
-	log.Infof("Task %s completed successfully.", bt.Name())
+	log.Infof("Task '%s' completed successfully with all steps successful.", bt.Name())
 	return nil
 }
 

@@ -1,35 +1,49 @@
 package pipeline
 
 import (
-	"github.com/mensylisir/xmcores/module"  // Assuming module path
 	"github.com/mensylisir/xmcores/runtime"
 	"github.com/sirupsen/logrus"
 )
 
-// Pipeline represents the highest level of execution, orchestrating a series of modules
-// to achieve a complex end-to-end goal, e.g., "DeployKubernetesClusterPipeline".
+// ParameterType defines the type of a parameter.
+// Using string for simplicity, could be an iota-based enum for stricter type checking.
+type ParameterType string
+
+const (
+	ParamTypeString  ParameterType = "string"
+	ParamTypeInteger ParameterType = "integer"
+	ParamTypeBoolean ParameterType = "boolean"
+	ParamTypeMap     ParameterType = "map"
+	ParamTypeList    ParameterType = "list" // Could be list of strings, integers, etc.
+)
+
+// ParameterDefinition describes an expected parameter for a pipeline.
+type ParameterDefinition struct {
+	Name         string        `json:"name" yaml:"name"`
+	Type         ParameterType `json:"type" yaml:"type"`
+	Description  string        `json:"description" yaml:"description"`
+	Required     bool          `json:"required" yaml:"required"`
+	DefaultValue interface{}   `json:"defaultValue,omitempty" yaml:"defaultValue,omitempty"` // Optional default value
+}
+
+// Pipeline represents a high-level workflow consisting of multiple modules or tasks.
+// It defines its expected input parameters.
 type Pipeline interface {
-	// Name returns the short name of the pipeline.
+	// Name returns the unique name of the pipeline.
 	Name() string
 
-	// Description returns a human-readable description of what the pipeline does.
+	// Description provides a human-readable summary of what the pipeline does.
 	Description() string
 
-	// Modules returns the list of modules that this pipeline will execute.
-	Modules() []module.Module
+	// ExpectedParameters returns a list of parameter definitions that this pipeline expects as input.
+	// This allows for validation, UI generation, and clear documentation of pipeline inputs.
+	ExpectedParameters() []ParameterDefinition
 
-	// Init performs any initialization or validation required before execution.
-	// This typically involves initializing all its modules.
-	// The logger entry is pre-configured with pipeline context.
-	Init(rt runtime.Runtime, logger *logrus.Entry) error
-
-	// Execute performs the primary actions of the pipeline by executing its modules.
-	// Returns an error if the pipeline execution failed critically.
-	// The logger entry is pre-configured with pipeline context.
-	Execute(rt runtime.Runtime, logger *logrus.Entry) error
-
-	// Post performs any cleanup or final actions after Execute has completed.
-	// It receives the error (if any) from the Execute phase.
-	// The logger entry is pre-configured with pipeline context.
-	Post(rt runtime.Runtime, logger *logrus.Entry, executeErr error) error
+	// Execute runs the pipeline's workflow.
+	// - rt: The runtime environment providing access to hosts, runners, etc.
+	// - configData: A map containing the actual parameter values provided for this pipeline execution,
+	//               matching the definitions from ExpectedParameters().
+	// - logger: A logger entry for structured logging within the pipeline.
+	// It returns an error if the pipeline execution fails.
+	Execute(rt runtime.Runtime, configData map[string]interface{}, logger *logrus.Entry) error
 }

@@ -1,0 +1,66 @@
+apiVersion: installer.kubesphere.io/v1alpha1
+kind: ClusterConfig
+metadata:
+  name: ks-installer-cluster
+spec:
+  hosts:
+    - {name: master1, address: 192.168.0.10, internalAddress: 192.168.0.10, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
+    - {name: master2, address: 192.168.0.11, internalAddress: 192.168.0.11, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
+    - {name: master3, address: 192.168.0.12, internalAddress: 192.168.0.12, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
+    - {name: worker1, address: 192.168.0.20, internalAddress: 192.168.0.20, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
+    - {name: worker2, address: 192.168.0.21, internalAddress: 192.168.0.21, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
+
+  roleGroups:
+    etcd:
+      - master1
+      - master2
+      - master3
+    control-plane:
+      - master1
+      - master2
+      - master3
+    worker:
+      - worker1
+      - worker2
+
+  controlPlaneEndpoint:
+    domain: lb.kubesphere.local # Example domain
+    address: ""                # IP address can be empty if domain is used, or vice-versa. Pipeline should handle this logic.
+    port: 6443
+
+  kubernetes:
+    version: v1.28.2
+    clusterName: my-k8s-cluster # Can be overridden by metadata.name or used as a fallback
+    autoRenewCerts: true
+    containerManager: containerd
+
+  etcd:
+    type: kubeadm # 'kubeadm' for internal etcd, 'external' for user-provided
+
+  network:
+    plugin: calico # Options: calico, flannel, cilium, etc.
+    kubePodsCIDR: 10.244.0.0/16
+    kubeServiceCIDR: 10.96.0.0/12
+    blockSize: 26 # Example CNI block size, specific to some CNI plugins like Calico
+    multusCNI:
+      enabled: false # Set to true to enable Multus CNI
+
+  registry:
+    type: "docker" # Could be "harbor", "acr", "ecr", etc.
+    privateRegistry: "dockerhub.kubekey.local" # Your private registry domain
+    namespaceOverride: "kubekey" # Namespace to pull images from in private registry
+    auths:
+      "dockerhub.kubekey.local":
+        username: "admin"
+        password: "password"
+      "another.registry.com":
+        username: "user1"
+        password: "password123"
+    registryMirrors:
+      - "https://docker.mirrors.ustc.edu.cn"
+      - "https://registry.cn-hangzhou.aliyuncs.com"
+    insecureRegistries:
+      - "my-insecure-registry.local"
+
+  # internalLoadbalancer: "haproxy" # Optional: if an internal LB (like haproxy) is to be deployed by this tool
+                                 # If empty or not defined, assumes external LB or single control-plane node.

@@ -2,34 +2,26 @@ package module
 
 import (
 	"github.com/mensylisir/xmcores/runtime"
-	"github.com/mensylisir/xmcores/task"   // Assuming module path
 	"github.com/sirupsen/logrus"
 )
 
-// Module represents a collection of tasks that form a larger functional unit,
-// e.g., "RuntimeInstallationModule" which might include tasks for installing containerd, docker, etc.
+// Module represents a logical unit of work within a Pipeline.
+// It is responsible for a specific domain of operations (e.g., setting up Kubernetes control plane,
+// installing CNI, configuring a load balancer). Modules are orchestrated by a Pipeline.
 type Module interface {
-	// Name returns the short name of the module.
+	// Name returns the unique name of the module (e.g., "kubernetes-controlplane", "cni-calico").
 	Name() string
 
-	// Description returns a human-readable description of what the module does.
+	// Description provides a human-readable summary of what the module does.
 	Description() string
 
-	// Tasks returns the list of tasks that this module will execute.
-	Tasks() []task.Task
-
-	// Init performs any initialization or validation required before execution.
-	// This typically involves initializing all its tasks.
-	// The logger entry is pre-configured with module context.
-	Init(rt runtime.Runtime, logger *logrus.Entry) error
-
-	// Execute performs the primary actions of the module by executing its tasks.
-	// Returns an error if the module execution failed critically.
-	// The logger entry is pre-configured with module context.
-	Execute(rt runtime.Runtime, logger *logrus.Entry) error
-
-	// Post performs any cleanup or final actions after Execute has completed.
-	// It receives the error (if any) from the Execute phase.
-	// The logger entry is pre-configured with module context.
-	Post(rt runtime.Runtime, logger *logrus.Entry, executeErr error) error
+	// Execute runs the module's logic.
+	// - pipelineRuntime: The runtime environment scoped for the current pipeline execution.
+	//                    It provides access to hosts, roles, and execution capabilities.
+	// - moduleSpec: The configuration specific to this module's execution. This is typically
+	//               a part of the overall ClusterConfig (e.g., config.KubernetesSpec, config.NetworkSpec),
+	//               passed down by the pipeline. The module will type-assert this to its expected struct.
+	// - logger: A logger entry pre-configured with pipeline and module context.
+	// It returns an error if the module execution fails.
+	Execute(pipelineRuntime runtime.Runtime, moduleSpec interface{}, logger *logrus.Entry) error
 }
