@@ -14,8 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	// Ensure pipeline implementations are imported to trigger their init() registration functions.
-	// For now, we only have InstallKubernetesPipeline.
-	_ "github.com/mensylisir/xmcores/pipeline/installkubernetes"
+	_ "github.com/mensylisir/xmcores/pipeline/kubernetes" // Corrected import path
 )
 
 var (
@@ -37,10 +36,14 @@ var rootCmd = &cobra.Command{
 for orchestrating cluster lifecycle management, including creation,
 deletion, and scaling of Kubernetes clusters.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Initialize logger here based on global flags, so all subcommands benefit
-		// Precedence: verboseFlag > logLevelFlag > default "info"
 		effectiveLogLevel := "info"
-		if logLevelFlag != "" {
+
+		userSetLogLevel := false
+		if cmd.Flags().Changed("log-level") {
+			userSetLogLevel = true
+		}
+
+		if userSetLogLevel && logLevelFlag != "" {
 			effectiveLogLevel = logLevelFlag
 		}
 		if verboseFlag {
@@ -49,13 +52,14 @@ deletion, and scaling of Kubernetes clusters.`,
 
 		level, err := logrus.ParseLevel(effectiveLogLevel)
 		if err != nil {
-			// Use fmt.Fprintf for pre-logger errors to ensure visibility
 			fmt.Fprintf(os.Stderr, "Invalid log level '%s', defaulting to 'info'. Error: %v\n", effectiveLogLevel, err)
-			logger.Log.SetLevel(logrus.InfoLevel)
+			logger.Log.SetLevel(logrus.InfoLevel) // Use the global logger instance
 		} else {
-			logger.Log.SetLevel(level)
+			logger.Log.SetLevel(level) // Use the global logger instance
 		}
-		// Initial log message after logger is configured
+		// Assign the global logger to a package-level variable for easy access if needed,
+		// or ensure all parts of the application use logger.Log directly.
+		// For now, mainLog in runCreateClusterCmd will derive from logger.Log.
 		logger.Log.Infof("xm CLI starting. Log level set to: %s", logger.Log.GetLevel().String())
 		return nil
 	},
@@ -76,21 +80,20 @@ var createClusterCmd = &cobra.Command{
 The configuration file defines all aspects of the cluster, including hosts,
 Kubernetes version, CNI plugin, and more.`,
 	Example: `  xm create cluster -f path/to/your/cluster-config.yaml`,
-	RunE:    runCreateClusterCmd, // Function to execute
+	RunE:    runCreateClusterCmd,
 }
 
 // runCreateClusterCmd is the actual execution logic for 'create cluster'
 func runCreateClusterCmd(cmd *cobra.Command, args []string) error {
+	// Use the globally configured logger.Log
 	mainLog := logger.Log.WithField(common.LogFieldApp, "xm-create-cluster")
 	mainLog.Infof("Starting 'create cluster' command...")
 
-	// Validate that the config file path flag was provided (Cobra's 'Required' should handle this, but good to double check)
 	if clusterConfigFilePath == "" {
 		return fmt.Errorf("cluster configuration file path (-f, --file) is required")
 	}
 	mainLog.Infof("Loading cluster configuration from: %s", clusterConfigFilePath)
 
-	// Load ClusterConfig
 	clusterCfg, err := config.LoadClusterConfig(clusterConfigFilePath)
 	if err != nil {
 		mainLog.Errorf("Failed to load cluster configuration: %v", err)
@@ -99,8 +102,7 @@ func runCreateClusterCmd(cmd *cobra.Command, args []string) error {
 	mainLog.Infof("Successfully loaded configuration for cluster: %s (API: %s, Kind: %s)",
 		clusterCfg.Metadata.Name, clusterCfg.APIVersion, clusterCfg.Kind)
 
-	// Pipeline Selection (Hardcoded for this command)
-	pipelineName := "cluster-install" // This command is dedicated to this pipeline
+	pipelineName := "cluster-install"
 	mainLog.Infof("Attempting to get pipeline: '%s'", pipelineName)
 
 	selectedPipeline, err := pipeline.GetPipeline(pipelineName)
@@ -110,50 +112,48 @@ func runCreateClusterCmd(cmd *cobra.Command, args []string) error {
 		if len(availablePipelines) > 0 {
 			errMsg += fmt.Sprintf(" Available registered pipelines: %s", strings.Join(availablePipelines, ", "))
 		} else {
-			errMsg += " No pipelines are currently registered. Ensure the 'cluster-install' pipeline is registered."
+			errMsg += " No pipelines are currently registered. Ensure the 'cluster-install' pipeline is registered (e.g., via blank import)."
 		}
 		mainLog.Error(errMsg)
 		return fmt.Errorf(errMsg)
 	}
 	mainLog.Infof("Using pipeline: %s (%s)", selectedPipeline.Name(), selectedPipeline.Description())
 
-	// Initial Runtime Configuration
-	// Global flags (workDirFlag, ignoreErrorsFlag, verboseFlag for Verbose) are already parsed by Cobra
-	// and their values are in the global variables.
+	// Initial Runtime Configuration (Global settings only)
 	rtCfg := runtime.Config{
 		WorkDir:     workDirFlag,
 		IgnoreError: ignoreErrorsFlag,
-		Verbose:     logger.Log.IsLevelEnabled(logrus.DebugLevel) || logger.Log.IsLevelEnabled(logrus.TraceLevel), // Derived from effective log level
-		ObjectName:  clusterCfg.Kind + "-" + clusterCfg.Metadata.Name,                                           // e.g., ClusterConfig-ks-installer-cluster
-		// AllHosts and RoleHosts are not set here; the pipeline is responsible for parsing them from ClusterConfig.Spec
+		Verbose:     logger.Log.IsLevelEnabled(logrus.DebugLevel) || logger.Log.IsLevelEnabled(logrus.TraceLevel),
+		ObjectName:  clusterCfg.Kind + "-" + clusterCfg.Metadata.Name, // e.g., ClusterConfig-ks-installer-cluster
+		AllHosts:    nil, // Pipeline's Init method is responsible for host setup
+		RoleHosts:   nil, // Pipeline's Init method is responsible for role setup
 	}
 
 	initialRt, err := runtime.NewRuntime(rtCfg)
 	if err != nil {
-		mainLog.Errorf("Failed to initialize runtime: %v", err)
-		return fmt.Errorf("failed to initialize runtime: %w", err)
+		mainLog.Errorf("Failed to initialize core runtime: %v", err)
+		return fmt.Errorf("failed to initialize core runtime: %w", err)
 	}
-	// The global logger.Log is already configured. If runtime needs its own scoped logger instance,
-	// it would typically be configured during NewRuntime or via a method.
-	// For now, modules/steps will receive logger instances derived from the mainLog passed to pipeline.Execute.
-	mainLog.Info("Initial runtime context created successfully.")
+	// It's assumed NewRuntime sets up its own logger based on global logger.Log state,
+	// or initialRt.Log() will provide a logger derived from the global one.
+	mainLog.Info("Core runtime context created successfully.")
 
-	// Prepare configData for the pipeline
-	pipelineConfigData := map[string]interface{}{
-		"clusterConfig": clusterCfg,
-		// Other global parameters derived from flags could be passed here if pipelines expect them at the top level
-		// For example, if a pipeline's ExpectedParameters included "globalLogLevelFromCLI":
-		// "globalLogLevelFromCLI": logLevelFlag, (though logger is already set globally)
+	// Pipeline Initialization
+	pipelineLogger := mainLog.WithField("pipeline", selectedPipeline.Name())
+	mainLog.Infof("Initializing pipeline: %s", selectedPipeline.Name())
+	if err = selectedPipeline.Init(clusterCfg, initialRt, pipelineLogger); err != nil {
+		mainLog.Errorf("Failed to initialize pipeline '%s': %v", selectedPipeline.Name(), err)
+		return fmt.Errorf("failed to initialize pipeline '%s': %w", selectedPipeline.Name(), err)
 	}
+	mainLog.Infof("Pipeline '%s' initialized successfully.", selectedPipeline.Name())
 
 	// Execute Pipeline
 	mainLog.Infof("Executing pipeline: %s", selectedPipeline.Name())
-	// Pass a logger entry that the pipeline can further scope for its modules/steps
-	pipelineLogger := mainLog.WithField("pipeline", selectedPipeline.Name())
-	err = selectedPipeline.Execute(initialRt, pipelineConfigData, pipelineLogger)
+	// The pipelineLogger is already scoped for the pipeline
+	err = selectedPipeline.Execute(pipelineLogger)
 	if err != nil {
 		mainLog.Errorf("Pipeline '%s' execution failed: %v", selectedPipeline.Name(), err)
-		return fmt.Errorf("pipeline '%s' execution failed: %w", selectedPipeline.Name(), err) // cobra prints errors returned from RunE
+		return fmt.Errorf("pipeline '%s' execution failed: %w", selectedPipeline.Name(), err)
 	}
 
 	mainLog.Infof("Pipeline '%s' executed successfully.", selectedPipeline.Name())
@@ -162,22 +162,16 @@ func runCreateClusterCmd(cmd *cobra.Command, args []string) error {
 }
 
 func init() {
-	// Bind global flags to rootCmd's persistent flags
-	rootCmd.PersistentFlags().StringVar(&logLevelFlag, "log-level", "info", "Log level (trace, debug, info, warn, error, fatal, panic)")
+	rootCmd.PersistentFlags().StringVar(&logLevelFlag, "log-level", "", "Log level (trace, debug, info, warn, error, fatal, panic)")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose (debug) logging (shorthand for --log-level=debug)")
 	rootCmd.PersistentFlags().StringVar(&workDirFlag, "work-dir", "./.xm_work_data", "Working directory for temporary files and operational data")
 	rootCmd.PersistentFlags().BoolVar(&ignoreErrorsFlag, "ignore-errors", false, "Ignore errors in individual steps and continue task/module/pipeline execution")
 
-	// Add createCmd as a subcommand to rootCmd
 	rootCmd.AddCommand(createCmd)
-
-	// Add createClusterCmd as a subcommand to createCmd
 	createCmd.AddCommand(createClusterCmd)
 
-	// Define flags for createClusterCmd
 	createClusterCmd.Flags().StringVarP(&clusterConfigFilePath, "file", "f", "", "Path to the cluster configuration YAML file (required)")
 	if err := createClusterCmd.MarkFlagRequired("file"); err != nil {
-		// This error handling is at setup time. If MarkFlagRequired fails, it's a programming error.
 		fmt.Fprintf(os.Stderr, "Error marking 'file' flag as required: %v\n", err)
 		os.Exit(1)
 	}
@@ -185,9 +179,8 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		// Cobra's Execute already prints the error to stderr by default.
-		// We might add additional global error handling or logging here if needed.
-		// For now, just exit with an error code.
+		// Cobra's Execute prints errors from RunE to stderr by default.
+		// No need for additional fmt.Fprintf(os.Stderr, "Error: %v\n", err) here.
 		os.Exit(1)
 	}
 }

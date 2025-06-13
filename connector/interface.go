@@ -85,3 +85,43 @@ type Connector interface {
 // If ssh.go's Config is not public or intended for direct use by interface consumers,
 // GetConfig() might need to return a different, more abstract config representation.
 // Given the existing code, it's likely the ssh.go Config.
+
+
+// Host defines the interface for a target host in the cluster.
+// It encapsulates connection details and host-specific properties.
+type Host interface {
+	GetName() string
+	SetName(name string)
+	GetAddress() string
+	SetAddress(addr string)
+	GetInternalAddress() string
+	SetInternalAddress(addr string)
+	GetInternalIPv4Address() string
+	GetInternalIPv6Address() string
+	SetInternalAddresses(ipv4, ipv6 string)
+	GetPort() int
+	SetPort(port int)
+	GetUser() string
+	SetUser(u string)
+	GetPassword() string
+	SetPassword(password string)
+	GetPrivateKey() string
+	SetPrivateKey(privateKey string)
+	GetPrivateKeyPath() string
+	SetPrivateKeyPath(path string)
+	GetArch() string
+	SetArch(arch string)
+	GetTimeout() time.Duration
+	SetTimeout(timeout time.Duration)
+	GetRoles() []string
+	SetRoles(roles []string)
+	AddRole(role string)
+	RemoveRole(role string)
+	IsRole(role string) bool
+	GetVars() map[string]interface{}
+	SetVars(vars map[string]interface{})
+	GetVar(key string) (value interface{}, exists bool)
+	SetVar(key string, value interface{})
+	Validate() error
+	ID() string
+}

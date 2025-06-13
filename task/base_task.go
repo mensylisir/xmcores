@@ -2,213 +2,178 @@ package task
 
 import (
 	"fmt"
-	"strings"
+	// "strings" // For error aggregation if re-implementing complex summary
 
-	"github.com/mensylisir/xmcores/common" // For logger field constants
-	"github.com/mensylisir/xmcores/logger"  // For the global logger if needed, or pass entry
 	"github.com/mensylisir/xmcores/runtime"
 	"github.com/mensylisir/xmcores/step"
 	"github.com/sirupsen/logrus"
 )
 
-// StepExecutionResult holds the outcome of a single step's execution.
-type StepExecutionResult struct {
-	StepName string
-	Success  bool
-	Error    error
-	Output   string // Optional: To store primary output for summary
-}
-
-// BaseTask provides a basic implementation for the Task interface.
-// It can be embedded in concrete task implementations.
+// BaseTask provides a foundational implementation for the Task interface.
+// It manages step execution and basic state.
 type BaseTask struct {
-	name        string
-	description string
-	steps       []step.Step
-	// We can add fields for overall status if needed, e.g.,
-	// succeeded bool
-	// output    string
+	NameField        string // Using NameField to avoid conflict with Name() method
+	DescriptionField string
+	logger           *logrus.Entry
+	runtime          runtime.Runtime // Runtime passed from module during Init
+	steps            []step.Step
+	// taskSpec         interface{} // Optionally store the raw taskSpec if needed by BaseTask logic beyond Init
 }
 
-// NewBaseTask creates a new BaseTask.
-// Steps should be added via AddStep or SetSteps.
+// NewBaseTask creates a new BaseTask with a name and description.
 func NewBaseTask(name, description string) BaseTask {
 	return BaseTask{
-		name:        name,
-		description: description,
-		steps:       make([]step.Step, 0),
+		NameField:        name,
+		DescriptionField: description,
+		steps:            make([]step.Step, 0),
 	}
 }
 
 // Name returns the name of the task.
 func (bt *BaseTask) Name() string {
-	return bt.name
-}
-
-// SetName sets the name of the task.
-func (bt *BaseTask) SetName(name string) {
-	bt.name = name
+	return bt.NameField
 }
 
 // Description returns the description of the task.
 func (bt *BaseTask) Description() string {
-	return bt.description
+	return bt.DescriptionField
 }
 
-// SetDescription sets the description of the task.
-func (bt *BaseTask) SetDescription(desc string) {
-	bt.description = desc
+// Init stores the provided moduleRuntime and logger.
+// Concrete task implementations should call this BaseTask.Init, then assert their specific
+// taskSpec, and then use AddStep to populate their steps.
+func (bt *BaseTask) Init(moduleRuntime runtime.Runtime, taskSpec interface{}, logger *logrus.Entry) error {
+	if logger == nil {
+		return fmt.Errorf("logger cannot be nil for BaseTask Init")
+	}
+	bt.logger = logger.WithField("task_name", bt.NameField) // Scope logger
+	if moduleRuntime == nil {
+		return fmt.Errorf("moduleRuntime cannot be nil for BaseTask Init")
+	}
+	bt.runtime = moduleRuntime
+	// bt.taskSpec = taskSpec // Concrete task will handle and use the taskSpec for its step setup.
+	bt.logger.Info("BaseTask initialized (runtime and logger stored). Steps should be added by concrete task's Init.")
+	return nil
 }
 
+// AddStep adds a step to the task's execution sequence.
+// This should be called by the concrete task's Init method after steps are created and initialized.
+func (bt *BaseTask) AddStep(s step.Step) {
+	if s == nil {
+		bt.logger.Warn("Attempted to add a nil step.")
+		return
+	}
+	bt.steps = append(bt.steps, s)
+}
 
-// Steps returns the list of steps in the task.
+// Steps returns the list of steps configured for this task.
 func (bt *BaseTask) Steps() []step.Step {
-	// Return a copy to prevent external modification
+	// Return a copy to prevent external modification, good practice.
 	s := make([]step.Step, len(bt.steps))
 	copy(s, bt.steps)
 	return s
 }
 
-// AddStep adds a step to the task's execution list.
-func (bt *BaseTask) AddStep(s step.Step) {
-	bt.steps = append(bt.steps, s)
-}
-
-// SetSteps sets the list of steps for the task.
-func (bt *BaseTask) SetSteps(steps []step.Step) {
-	bt.steps = make([]step.Step, len(steps))
-	copy(bt.steps, steps)
-}
-
-// Init provides a default Init implementation that initializes all added steps.
-// Concrete tasks can override this if they have more complex initialization logic.
-func (bt *BaseTask) Init(rt runtime.Runtime, log *logrus.Entry) error {
-	log.Debugf("BaseTask.Init called for task: %s. Initializing %d steps.", bt.Name(), len(bt.steps))
-	if len(bt.steps) == 0 {
-		log.Warn("No steps defined for this task.")
-		// Depending on requirements, this could be an error:
-		// return fmt.Errorf("no steps defined for task %s", bt.Name())
-	}
-	for i, s := range bt.steps {
-		stepLog := log.WithFields(logrus.Fields{
-			common.LogFieldStepName: s.Name(),
-			"step_index":            fmt.Sprintf("%d/%d", i+1, len(bt.steps)),
-		})
-		stepLog.Infof("Initializing step: %s (%s)", s.Name(), s.Description())
-		if err := s.Init(rt, stepLog); err != nil {
-			stepLog.Errorf("Failed to initialize step %s: %v", s.Name(), err)
-			return fmt.Errorf("failed to initialize step %s (index %d) in task %s: %w", s.Name(), i, bt.Name(), err)
+// Execute iterates through the configured steps and executes them.
+// It uses the logger and runtime stored during BaseTask.Init.
+func (bt *BaseTask) Execute(loggerConvenienceParam *logrus.Entry) error {
+	// Use the logger initialized in BaseTask.Init. The loggerConvenienceParam is mostly to satisfy
+	// the interface if we want modules/pipelines to pass their logger directly, but BaseTask
+	// should ideally use its own initialized and scoped logger (bt.logger).
+	taskExecLogger := bt.logger
+	if taskExecLogger == nil { // Safeguard if Init wasn't called properly or logger wasn't set
+		if loggerConvenienceParam != nil {
+			taskExecLogger = loggerConvenienceParam.WithField("task_execute_safeguard", bt.NameField)
+		} else {
+			// Fallback to a default logger if absolutely necessary, though this indicates an issue.
+			// This shouldn't happen if Init is called correctly.
+			return fmt.Errorf("task '%s' logger not initialized before Execute", bt.NameField)
 		}
 	}
-	log.Infof("All %d steps for task %s initialized successfully.", len(bt.steps), bt.Name())
-	return nil
-}
 
-// Execute provides a default Execute implementation that runs all steps sequentially.
-func (bt *BaseTask) Execute(rt runtime.Runtime, log *logrus.Entry) error {
-	log.Infof("Executing task: %s (%s)", bt.Name(), bt.Description())
+	taskExecLogger.Infof("Executing task: %s (%s)", bt.Name(), bt.Description())
 	if len(bt.steps) == 0 {
-		log.Warnf("Task %s has no steps to execute.", bt.Name())
-		return nil // Or an error if tasks must have steps
+		taskExecLogger.Warn("Task has no steps to execute.")
+		return nil
 	}
+
+	if bt.runtime == nil { // Safeguard
+		return fmt.Errorf("task '%s' runtime not initialized before Execute", bt.NameField)
+	}
+
 
 	var overallTaskFailed bool
-	stepResults := make([]StepExecutionResult, 0, len(bt.steps))
+	// Summary report and detailed error aggregation can be added here later,
+	// similar to the previous BaseTask.Execute that was refactored out.
+	// For now, focusing on the Init/Execute pattern for steps.
 
 	for i, currentStep := range bt.steps {
-		stepLog := log.WithFields(logrus.Fields{
-			common.LogFieldStepName: currentStep.Name(),
-			"step_index":            fmt.Sprintf("%d/%d", i+1, len(bt.steps)),
-		})
-		stepLog.Infof("Executing step: %s (%s)", currentStep.Name(), currentStep.Description())
-		fmt.Printf("===> Executing Step: %s (%s)\n", currentStep.Name(), currentStep.Description())
-
-		stepOutput, stepSuccess, stepErr := currentStep.Execute(rt, stepLog)
-
-		if stepOutput != "" {
-			stepLog.Debugf("Step execution output:\n%s", stepOutput)
-		}
-
-		// Call Post for the current step, regardless of its success/failure from Execute
-		postLog := stepLog.WithField("sub_phase", "post_execute")
-		postErr := currentStep.Post(rt, postLog, stepErr) // Pass Execute's error to Post
-
-		currentStepSuccess := stepSuccess && stepErr == nil && postErr == nil
-		var combinedErr error
-		errorMessages := []string{}
-
-		if stepErr != nil {
-			errorMessages = append(errorMessages, stepErr.Error())
-		}
-		if postErr != nil {
-			postLog.Errorf("Error during Post-Execute for step %s: %v", currentStep.Name(), postErr)
-			errorMessages = append(errorMessages, fmt.Sprintf("post-execute error: %v", postErr))
-		}
-
-		if len(errorMessages) > 0 {
-			combinedErr = fmt.Errorf(strings.Join(errorMessages, "; "))
-		}
-
-		stepResults = append(stepResults, StepExecutionResult{
-			StepName: currentStep.Name(),
-			Success:  currentStepSuccess,
-			Error:    combinedErr,
-			Output:   stepOutput, // Or a summary if needed
+		stepLogger := taskExecLogger.WithFields(logrus.Fields{
+			"step_name": currentStep.Name(),
+			"step_index": fmt.Sprintf("%d/%d", i+1, len(bt.steps)),
 		})
 
-		if !currentStepSuccess {
+		// Step Init:
+		// It's assumed that the concrete Task's Init method is responsible for initializing its steps
+		// *before* adding them to BaseTask. If a step requires runtime/logger for its own Init,
+		// the concrete Task's Init should provide that.
+		// The "guard Init" here is a fallback, but steps should ideally be fully ready.
+		// Let's remove the guard init for now, to enforce that concrete tasks handle step init.
+		// stepLogger.Infof("Initializing step (guard): %s (%s)", currentStep.Name(), currentStep.Description())
+		// if err := currentStep.Init(bt.runtime, stepLogger.WithField("phase", "step_init_guard")); err != nil {
+		//      stepLogger.Errorf("Guard Init for step %s failed: %v", currentStep.Name(), err)
+		//      if !bt.runtime.IgnoreError() {
+		//          return fmt.Errorf("guard Init for step %s failed: %w", currentStep.Name(), err)
+		//      }
+		//      overallTaskFailed = true // Mark task as failed
+		//      continue // Skip Execute and Post if Init guard fails
+		// }
+
+
+		// Step Execute:
+		stepLogger.Infof("Executing step: %s (%s)", currentStep.Name(), currentStep.Description())
+		output, success, execErr := currentStep.Execute(bt.runtime, stepLogger.WithField("phase", "step_execute"))
+
+		// Step Post: (Using the error from Execute)
+		postErr := currentStep.Post(bt.runtime, stepLogger.WithField("phase", "step_post"), execErr)
+
+		if execErr != nil {
+			stepLogger.Errorf("Step %s execution failed: %v. Output: %s", currentStep.Name(), execErr, output)
 			overallTaskFailed = true
-			stepLog.Errorf("Step %s determined as FAILED. Success: %v, CombinedError: %v", currentStep.Name(), currentStepSuccess, combinedErr)
-			// User visibility message is now part of the summary
+			if !bt.runtime.IgnoreError() {
+				return fmt.Errorf("step '%s' execution failed: %w", currentStep.Name(), execErr)
+			}
+		} else if !success {
+			stepLogger.Warnf("Step %s completed but reported not successful (no error from Execute). Output: %s", currentStep.Name(), output)
+			overallTaskFailed = true // Treat non-success as a failure for the task
+			if !bt.runtime.IgnoreError() {
+				return fmt.Errorf("step '%s' reported not successful", currentStep.Name())
+			}
 		} else {
-			stepLog.Infof("Step %s determined as SUCCEEDED.", currentStep.Name())
-			// User visibility message is now part of the summary
+			stepLogger.Infof("Step %s execution phase completed successfully. Output: %s", currentStep.Name(), output)
 		}
-	}
 
-	// Print Summary Report
-	fmt.Printf("\n--- Task Execution Summary for '%s' ---\n", bt.Name())
-	log.Info("--- Task Execution Summary ---") // Log summary start as well
-	for _, result := range stepResults {
-		status := "SUCCEEDED"
-		errMsg := ""
-		if !result.Success {
-			status = "FAILED"
-			if result.Error != nil {
-				errMsg = fmt.Sprintf(" (Error: %v)", result.Error)
-			} else {
-				errMsg = " (Reason: reported not successful)" // Should ideally have an error if !Success
+		if postErr != nil {
+			stepLogger.Errorf("Step %s post-execution failed: %v", currentStep.Name(), postErr)
+			overallTaskFailed = true
+			if !bt.runtime.IgnoreError() {
+				// If Execute was successful but Post failed, we still need to signal task failure.
+				return fmt.Errorf("step '%s' post-execution failed: %w", currentStep.Name(), postErr)
 			}
 		}
-		summaryLine := fmt.Sprintf("Step '%s': %s%s", result.StepName, status, errMsg)
-		fmt.Println(summaryLine)
-		if result.Success {
-			log.Infof(summaryLine)
-		} else {
-			log.Errorf(summaryLine)
-		}
 	}
-	fmt.Println("------------------------------------")
-	log.Info("------------------------------------")
-
 
 	if overallTaskFailed {
-		log.Errorf("Task '%s' completed with one or more errors.", bt.Name())
-		if !rt.IgnoreError() {
-			return fmt.Errorf("task '%s' completed with one or more errors. See summary above for details.", bt.Name())
+		taskExecLogger.Errorf("Task '%s' completed with one or more errors.", bt.Name())
+		if !bt.runtime.IgnoreError() { // Check IgnoreError for the final task return
+			return fmt.Errorf("task %s completed with one or more errors", bt.Name())
 		}
-		log.Warnf("Task '%s' had errors, but IgnoreError is true. Overall task considered non-failed due to IgnoreError.", bt.Name())
-		return nil // Return nil because errors are being ignored at the task level
+		taskExecLogger.Warnf("Task '%s' had errors, but IgnoreError is true. Task considered non-failed overall.", bt.Name())
+	} else {
+		taskExecLogger.Infof("Task '%s' and all its steps completed successfully.", bt.Name())
 	}
-
-	log.Infof("Task '%s' completed successfully with all steps successful.", bt.Name())
 	return nil
 }
 
-// Post provides a default no-op Post implementation for the task itself.
-// Concrete tasks can override this for task-level cleanup.
-func (bt *BaseTask) Post(rt runtime.Runtime, log *logrus.Entry, executeErr error) error {
-	log.Debugf("BaseTask.Post called for task %s.", bt.Name())
-	// If task-level cleanup depends on Execute's success/failure, use executeErr.
-	return nil
-}
+// Ensure BaseTask implements the Task interface.
+var _ Task = (*BaseTask)(nil)

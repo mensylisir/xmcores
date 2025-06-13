@@ -23,13 +23,13 @@ type MetadataSpec struct {
 // ClusterSpec defines the main configuration details for the cluster.
 type ClusterSpec struct {
 	Hosts                []HostSpec               `yaml:"hosts"`
-	RoleGroups           map[string][]string      `yaml:"roleGroups"` // e.g., "etcd": ["master1", "master2"], "worker": ["worker1"]
+	RoleGroups           map[string][]string      `yaml:"roleGroups"`
 	ControlPlaneEndpoint ControlPlaneEndpointSpec `yaml:"controlPlaneEndpoint"`
 	Kubernetes           KubernetesSpec           `yaml:"kubernetes"`
 	Etcd                 EtcdSpec                 `yaml:"etcd"`
 	Network              NetworkSpec              `yaml:"network"`
 	Registry             RegistrySpec             `yaml:"registry"`
-	InternalLoadbalancer string                   `yaml:"internalLoadbalancer,omitempty"`
+	// InternalLoadbalancer string field was here, removed as it's now part of ControlPlaneEndpoint.LoadBalancer
 }
 
 // HostSpec defines the configuration for a single host.
@@ -37,43 +37,50 @@ type HostSpec struct {
 	Name            string `yaml:"name"`
 	Address         string `yaml:"address"`
 	InternalAddress string `yaml:"internalAddress"`
-	Port            int    `yaml:"port,omitempty"` // Default to 22 if not specified by user
+	Port            int    `yaml:"port,omitempty"`
 	User            string `yaml:"user"`
 	Password        string `yaml:"password,omitempty"`
 	PrivateKeyPath  string `yaml:"privateKeyPath,omitempty"`
-	// Arch string `yaml:"arch,omitempty"` // Can be added if needed per host
+}
+
+// LoadBalancerConfigSpec defines the configuration for a load balancer for the control plane.
+type LoadBalancerConfigSpec struct {
+	Enable bool   `yaml:"enable"`           // If true, indicates load balancing for the control plane is enabled.
+	Type   string `yaml:"type,omitempty"` // e.g., "haproxy-keepalived" (if managed by this tool), "external" (if user-provided)
 }
 
 // ControlPlaneEndpointSpec defines the control plane endpoint.
 type ControlPlaneEndpointSpec struct {
-	Domain  string `yaml:"domain,omitempty"` // e.g., lb.kubesphere.local
-	Address string `yaml:"address"`          // IP address if no domain
-	Port    int    `yaml:"port"`             // e.g., 6443
+	Domain       string                 `yaml:"domain,omitempty"`
+	Address      string                 `yaml:"address"` // VIP if internal LB, or IP of external LB, or IP of single CP node
+	Port         int                    `yaml:"port"`
+	LoadBalancer LoadBalancerConfigSpec `yaml:"loadbalancer,omitempty"`
 }
 
 // KubernetesSpec defines Kubernetes specific configurations.
 type KubernetesSpec struct {
 	Version          string `yaml:"version"`
-	ClusterName      string `yaml:"clusterName,omitempty"` // Optional, metadata.name can be primary
+	ClusterName      string `yaml:"clusterName,omitempty"`
 	AutoRenewCerts   bool   `yaml:"autoRenewCerts,omitempty"`
-	ContainerManager string `yaml:"containerManager"` // e.g., containerd, docker
+	ContainerManager string `yaml:"containerManager"`
+	Type             string `yaml:"type"` // Installation type: "kubeadm", "kubexm" (binary)
 }
 
 // EtcdSpec defines etcd configuration.
 type EtcdSpec struct {
-	Type      string   `yaml:"type"` // "kubeadm", "xm", "external"
-	Endpoints []string `yaml:"endpoints,omitempty"` // For type "external"
-	CAFile    string   `yaml:"caFile,omitempty"`    // For type "external"
-	CertFile  string   `yaml:"certFile,omitempty"`  // For type "external"
-	KeyFile   string   `yaml:"keyFile,omitempty"`   // For type "external"
+	Type      string   `yaml:"type"` // Expected values: "kubeadm" (stacked on control plane), "external" (user-provided), "kubexm" (managed by xmcores)
+	Endpoints []string `yaml:"endpoints,omitempty"` // Required for type "external"
+	CAFile    string   `yaml:"caFile,omitempty"`    // Required for type "external" (TLS)
+	CertFile  string   `yaml:"certFile,omitempty"`  // Required for type "external" (TLS)
+	KeyFile   string   `yaml:"keyFile,omitempty"`   // Required for type "external" (TLS)
 }
 
 // NetworkSpec defines network configuration.
 type NetworkSpec struct {
-	Plugin          string        `yaml:"plugin"`    // e.g., calico, flannel, cilium
+	Plugin          string        `yaml:"plugin"`
 	KubePodsCIDR    string        `yaml:"kubePodsCIDR"`
 	KubeServiceCIDR string        `yaml:"kubeServiceCIDR"`
-	BlockSize       *int          `yaml:"blockSize,omitempty"` // Pointer to distinguish between 0 and not set
+	BlockSize       *int          `yaml:"blockSize,omitempty"`
 	MultusCNI       MultusCNISpec `yaml:"multusCNI,omitempty"`
 }
 
@@ -86,17 +93,16 @@ type MultusCNISpec struct {
 type RegistryAuthCredentials struct {
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
-	// Auth string `yaml:"auth,omitempty"` // Base64 encoded user:pass, alternative
 }
 
 // RegistrySpec defines container registry configurations.
 type RegistrySpec struct {
-	Type              string                             `yaml:"type,omitempty"` // e.g., docker, harbor
+	Type              string                             `yaml:"type,omitempty"`
 	Auths             map[string]RegistryAuthCredentials `yaml:"auths,omitempty"`
-	PrivateRegistry   string                             `yaml:"privateRegistry,omitempty"`   // e.g., dockerhub.kubekey.local
-	NamespaceOverride string                             `yaml:"namespaceOverride,omitempty"` // e.g., kubekey
-	RegistryMirrors   []string                           `yaml:"registryMirrors,omitempty"`   // e.g., ["https://docker.mirrors.ustc.edu.cn"]
-	InsecureRegistries []string                           `yaml:"insecureRegistries,omitempty"`// e.g., ["my-private-registry.com"]
+	PrivateRegistry   string                             `yaml:"privateRegistry,omitempty"`
+	NamespaceOverride string                             `yaml:"namespaceOverride,omitempty"`
+	RegistryMirrors   []string                           `yaml:"registryMirrors,omitempty"`
+	InsecureRegistries []string                           `yaml:"insecureRegistries,omitempty"`
 }
 
 // LoadClusterConfig reads a YAML file from the given path and unmarshals it
@@ -117,7 +123,6 @@ func LoadClusterConfig(filePath string) (*ClusterConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal config data from '%s': %w", filePath, err)
 	}
 
-	// Basic validation example (can be expanded)
 	if cfg.APIVersion == "" {
 		return nil, fmt.Errorf("apiVersion is a required field in the config file '%s'", filePath)
 	}

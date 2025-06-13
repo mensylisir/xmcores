@@ -75,8 +75,11 @@ type connection struct {
 	bastionAgentSocketConn net.Conn           // 用于堡垒机主机的 Agent Socket 连接
 }
 
-// NewConnection 创建一个新的 Connection 实例
-func NewConnection(cfg Config) (Connection, error) {
+// Ensure connection struct implements the Connector interface.
+var _ Connector = (*connection)(nil)
+
+// NewConnection 创建一个新的 Connector 实例 (formerly Connection)
+func NewConnection(cfg Config) (Connector, error) { // Changed return type to Connector
 	var err error
 	cfg, err = validateOptions(cfg)
 	if err != nil {

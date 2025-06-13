@@ -45,14 +45,14 @@ Global operational flags can also be used:
 The `config.yaml` file defines the cluster specification. Below is an example structure for `kind: Cluster`:
 
 ```yaml
-apiVersion: installer.xiaoming.io/v1alpha1 # Updated API version
-kind: Cluster # Defines the object type
+apiVersion: installer.xiaoming.io/v1alpha1 # Defines the API version for this configuration
+kind: Cluster # Specifies the object type as Cluster
 metadata:
   name: my-k8s-cluster # Name of your cluster
 spec:
   hosts:
     - name: master01
-      address: 192.168.1.10       # External IP
+      address: 192.168.1.10       # External IP used for SSH
       internalAddress: 192.168.1.10 # Internal IP, can be same as address
       port: 22
       user: root
@@ -77,8 +77,12 @@ spec:
     #   - master01 # Can be co-located or dedicated hosts
 
   controlPlaneEndpoint:
-    # domain: "k8s-api.example.local" # DNS name for the API server (recommended)
-    address: "192.168.1.10" # VIP or IP of the (first) control plane node if no LB/domain
+    loadbalancer:
+      enable: true # Set to true to enable load balancing for the control plane
+      type: "haproxy-keepalived" # Options: "haproxy-keepalived" (if managed by xmcores), "external" (for user-provided LB)
+    domain: "k8s-api.example.local"     # DNS name for the VIP or external LB
+    address: "192.168.1.100"          # VIP for managed LB, or address of external LB. Interpreted by pipeline.
+                                      # Can be empty if domain is resolvable and preferred.
     port: 6443
 
   kubernetes:
@@ -86,6 +90,7 @@ spec:
     clusterName: "production-cluster" # A user-friendly name for the cluster
     autoRenewCerts: true
     containerManager: "containerd" # Currently focused on containerd
+    type: "kubeadm" # Installation type: "kubeadm" (uses kubeadm) or "kubexm" (binary deployment, future)
 
   network:
     plugin: "calico" # Specify CNI plugin (e.g., calico, flannel, cilium)
@@ -98,7 +103,7 @@ spec:
   registry: # Optional: Configuration for a private or mirrored container registry
     # type: "docker" # Type of registry, e.g., docker, harbor (for future specific handling)
     privateRegistry: "your.private.registry:5000" # Domain of your private registry
-    # namespaceOverride: "my-images" # Optional: Override the default namespace for images (e.g. k8s.gcr.io -> your.private.registry/my-images)
+    # namespaceOverride: "my-images" # Optional: Override the default namespace for images
     auths: # Credentials for private registries
       "your.private.registry:5000":
         username: "user"
@@ -109,8 +114,10 @@ spec:
       - "your.private.registry:5000" # Often needed if private registry uses self-signed certs
 
   etcd:
-    type: "kubeadm" # Default and recommended for most cases. Etcd is stacked on control-plane nodes.
-    # For an external etcd cluster, use type "external" and provide details:
+    type: "kubeadm" # Default. Etcd is stacked on control-plane nodes, managed by kubeadm.
+    # Example for xmcores-managed etcd (binary deployment):
+    # type: "kubexm"
+    # Example for external etcd cluster:
     # type: "external"
     # endpoints:
     #   - "https://etcd1.example.com:2379"
@@ -119,23 +126,19 @@ spec:
     # caFile: "/path/to/external/etcd-ca.crt"
     # certFile: "/path/to/external/etcd-client.crt"
     # keyFile: "/path/to/external/etcd-client.key"
-    # The "xm" type for etcd is reserved for future use where xmcores might manage a separate etcd cluster.
-
-  # internalLoadbalancer: "haproxy" # Optional: if xmcores should deploy an internal LB (like haproxy+keepalived)
-                                 # If empty, assumes an external LB or a single control-plane node setup.
 ```
 
 Key `spec` fields:
 - `hosts`: A list of all machines involved in the cluster, with their SSH details.
 - `roleGroups`: Assigns roles (like `etcd`, `control-plane`, `worker`, `loadbalancer`) to the hosts defined in `spec.hosts`.
-- `controlPlaneEndpoint`: Defines how to access the Kubernetes API server (via domain or direct IP/VIP).
-- `kubernetes`: Kubernetes-specific settings like version, cluster name, and container manager.
+- `controlPlaneEndpoint`: Defines how to access the Kubernetes API server. The `loadbalancer` sub-field configures if and how a load balancer is used for the control plane.
+- `kubernetes`: Kubernetes-specific settings like `version`, `clusterName`, `containerManager`, and installation `type` ("kubeadm" or "kubexm").
 - `network`: CNI plugin configuration (e.g., Calico, Flannel), Pod and Service CIDRs, and optional CNI-specific settings like `blockSize`.
 - `registry`: Optional settings for using private or mirrored container registries, including authentication.
 - `etcd`: Configuration for the etcd cluster.
     - `type`: Defines the etcd deployment strategy:
         - `"kubeadm"`: (Default) Etcd is managed by kubeadm and typically stacked on control-plane nodes.
-        - `"xm"`: (Future) Etcd cluster managed by `xmcores` itself (deployed as separate binaries).
+        - `"kubexm"`: (Future) Etcd cluster to be installed and managed by `xmcores` as separate binaries on hosts in the "etcd" role.
         - `"external"`: Use a pre-existing, external etcd cluster. Requires specifying `endpoints`, and TLS certificate paths (`caFile`, `certFile`, `keyFile`).
 
 ## Development
@@ -143,8 +146,11 @@ Key `spec` fields:
 (This section can be expanded later with details on how to contribute, build modules, etc.)
 
 Key architectural components:
-- **Pipelines (`pipeline/`)**: Orchestrate high-level operations (e.g., cluster installation).
+- **Pipelines (`pipeline/`)**: Orchestrate high-level operations. Pipelines are organized by resource and action (e.g., `pipeline/kubernetes/install.go` for installing Kubernetes).
 - **Modules (`module/`)**: Implement specific stages within a pipeline (e.g., CNI setup, control plane initialization).
-- **Steps (`step/`)**: Smallest units of execution, performing individual actions.
+- **Tasks (`task/`)**: Encapsulate a sequence of steps to perform a specific part of a module's work.
+- **Steps (`step/`)**: Smallest units of execution, performing individual actions (e.g., running a command, copying a file).
 - **Runtime (`runtime/`)**: Manages execution context, including host connections and executors.
 - **Configuration (`config/`)**: Handles parsing of the `ClusterConfig` YAML.
+
+Components like Pipelines, Modules, and Tasks now follow an Init/Execute pattern. The `Init()` phase is responsible for configuration validation, setup, and assembling child components (e.g., a pipeline initializes modules, a module initializes tasks, a task initializes steps). The `Execute()` phase then performs the actual work by invoking its children or executing its own logic.

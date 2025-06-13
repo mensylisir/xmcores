@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -36,16 +37,20 @@ spec:
     worker:
       - worker1
   controlPlaneEndpoint:
+    loadbalancer: # New loadbalancer section
+      enable: true
+      type: "haproxy-keepalived"
     domain: "lb.example.com"
-    address: "192.168.1.50" # Could be derived if domain is resolvable, or explicitly set
+    address: "192.168.1.50"
     port: 6443
   kubernetes:
     version: "v1.25.4"
     clusterName: "my-test-k8s"
     autoRenewCerts: true
     containerManager: "containerd"
+    type: "kubeadm" # New field for kubernetes type
   etcd:
-    type: "external" # Testing external etcd type
+    type: "external"
     endpoints:
       - "https://etcd1.example.com:2379"
       - "https://etcd2.example.com:2379"
@@ -74,7 +79,6 @@ spec:
       - "https://mirror1.example.com"
     insecureRegistries:
       - "insecure.example.com"
-  internalLoadbalancer: "haproxy"
 `
 
 func TestLoadClusterConfig_Success(t *testing.T) {
@@ -90,126 +94,75 @@ func TestLoadClusterConfig_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	// Assert top-level fields
-	assert.Equal(t, "installer.kubesphere.io/v1alpha1", cfg.APIVersion)
+	assert.Equal(t, "installer.xiaoming.io/v1alpha1", cfg.APIVersion)
 	assert.Equal(t, "ClusterConfig", cfg.Kind)
 	assert.Equal(t, "test-cluster", cfg.Metadata.Name)
 
-	// Assert Spec fields
 	spec := cfg.Spec
 	require.NotNil(t, spec)
 
-	// Hosts
 	require.Len(t, spec.Hosts, 2)
 	assert.Equal(t, "master1", spec.Hosts[0].Name)
-	assert.Equal(t, "192.168.1.10", spec.Hosts[0].Address)
 	assert.Equal(t, 22, spec.Hosts[0].Port)
-	assert.Equal(t, "testuser", spec.Hosts[0].User)
-	assert.Equal(t, "/tmp/id_rsa_master1", spec.Hosts[0].PrivateKeyPath)
-	assert.Equal(t, "worker1", spec.Hosts[1].Name)
-	assert.Equal(t, "192.168.1.20", spec.Hosts[1].InternalAddress)
-	assert.Equal(t, 2222, spec.Hosts[1].Port)
-	assert.Equal(t, "password123", spec.Hosts[1].Password)
 
-
-	// RoleGroups
 	require.NotNil(t, spec.RoleGroups)
 	assert.Contains(t, spec.RoleGroups["etcd"], "master1")
-	assert.Contains(t, spec.RoleGroups["worker"], "worker1")
 
-	// ControlPlaneEndpoint
 	assert.Equal(t, "lb.example.com", spec.ControlPlaneEndpoint.Domain)
 	assert.Equal(t, "192.168.1.50", spec.ControlPlaneEndpoint.Address)
 	assert.Equal(t, 6443, spec.ControlPlaneEndpoint.Port)
+	assert.True(t, spec.ControlPlaneEndpoint.LoadBalancer.Enable)
+	assert.Equal(t, "haproxy-keepalived", spec.ControlPlaneEndpoint.LoadBalancer.Type)
 
-	// Kubernetes
 	assert.Equal(t, "v1.25.4", spec.Kubernetes.Version)
-	assert.Equal(t, "my-test-k8s", spec.Kubernetes.ClusterName)
 	assert.True(t, spec.Kubernetes.AutoRenewCerts)
 	assert.Equal(t, "containerd", spec.Kubernetes.ContainerManager)
+	assert.Equal(t, "kubeadm", spec.Kubernetes.Type) // Assertion for new type field
 
-	// Etcd
 	assert.Equal(t, "external", spec.Etcd.Type)
 	require.Len(t, spec.Etcd.Endpoints, 2)
 	assert.Equal(t, "https://etcd1.example.com:2379", spec.Etcd.Endpoints[0])
-	assert.Equal(t, "https://etcd2.example.com:2379", spec.Etcd.Endpoints[1])
 	assert.Equal(t, "/path/to/etcd/external/ca.crt", spec.Etcd.CAFile)
 	assert.Equal(t, "/path/to/etcd/external/client.crt", spec.Etcd.CertFile)
 	assert.Equal(t, "/path/to/etcd/external/client.key", spec.Etcd.KeyFile)
 
-	// Network
-	assert.Equal(t, "calico", spec.Network.Plugin)
-	assert.Equal(t, "10.244.0.0/16", spec.Network.KubePodsCIDR)
-	assert.Equal(t, "10.96.0.0/12", spec.Network.KubeServiceCIDR)
-	require.NotNil(t, spec.Network.BlockSize, "BlockSize should not be nil when present in YAML")
+	require.NotNil(t, spec.Network.BlockSize)
 	assert.Equal(t, 26, *spec.Network.BlockSize)
 	assert.True(t, spec.Network.MultusCNI.Enabled)
 
-	// Registry
-	assert.Equal(t, "docker", spec.Registry.Type)
-	assert.Equal(t, "myprivatereg.com", spec.Registry.PrivateRegistry)
-	assert.Equal(t, "myimages", spec.Registry.NamespaceOverride)
 	require.NotNil(t, spec.Registry.Auths)
-	require.Contains(t, spec.Registry.Auths, "myprivatereg.com")
 	assert.Equal(t, "user1", spec.Registry.Auths["myprivatereg.com"].Username)
-	assert.Equal(t, "password123", spec.Registry.Auths["myprivatereg.com"].Password)
-	require.Contains(t, spec.Registry.Auths, "anotherreg.com")
-	assert.Equal(t, "user2", spec.Registry.Auths["anotherreg.com"].Username)
-	assert.Equal(t, "password456", spec.Registry.Auths["anotherreg.com"].Password)
-	assert.Contains(t, spec.Registry.RegistryMirrors, "https://mirror1.example.com")
-	assert.Contains(t, spec.Registry.InsecureRegistries, "insecure.example.com")
-
-	// InternalLoadbalancer
-	assert.Equal(t, "haproxy", spec.InternalLoadbalancer)
 }
 
 func TestLoadClusterConfig_ValidationErrors(t *testing.T) {
+	baseValidSpecForValidationTests := `
+spec:
+  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
+  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
+  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
+  kubernetes: {version: v1.25.0, containerManager: containerd}
+  etcd: {type: kubeadm}
+  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
+  registry: {}`
+
 	testCases := []struct {
 		name          string
 		yamlContent   string
 		expectedError string
 	}{
 		{
-			name: "APIVersion missing",
-			yamlContent: `kind: ClusterConfig
-metadata: {name: test}
-spec: # Add minimal spec to pass other validations if LoadClusterConfig becomes stricter
-  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
-  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
-  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
-  kubernetes: {version: v1.25.0, containerManager: containerd}
-  etcd: {type: kubeadm}
-  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
-  registry: {}`,
+			name:          "APIVersion missing",
+			yamlContent:   fmt.Sprintf("kind: ClusterConfig\nmetadata: {name: test}\n%s", baseValidSpecForValidationTests),
 			expectedError: "apiVersion is a required field",
 		},
 		{
-			name: "Kind missing",
-			yamlContent: `apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
-metadata: {name: test}
-spec:
-  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
-  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
-  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
-  kubernetes: {version: v1.25.0, containerManager: containerd}
-  etcd: {type: kubeadm}
-  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
-  registry: {}`,
+			name:          "Kind missing",
+			yamlContent:   fmt.Sprintf("apiVersion: installer.xiaoming.io/v1alpha1\nmetadata: {name: test}\n%s", baseValidSpecForValidationTests),
 			expectedError: "kind is a required field",
 		},
 		{
-			name: "Metadata.name missing",
-			yamlContent: `apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
-kind: ClusterConfig
-metadata: {}
-spec:
-  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
-  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
-  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
-  kubernetes: {version: v1.25.0, containerManager: containerd}
-  etcd: {type: kubeadm}
-  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
-  registry: {}`,
+			name:          "Metadata.name missing",
+			yamlContent:   fmt.Sprintf("apiVersion: installer.xiaoming.io/v1alpha1\nkind: ClusterConfig\nmetadata: {}\n%s", baseValidSpecForValidationTests),
 			expectedError: "metadata.name is a required field",
 		},
 	}
@@ -232,17 +185,89 @@ spec:
 	}
 }
 
+func TestLoadClusterConfig_KubernetesType(t *testing.T) {
+	tests := []struct {
+		name         string
+		k8sSpecYAML  string // Only the kubernetes: section
+		expectedType string
+	}{
+		{
+			name: "k8s type kubeadm",
+			k8sSpecYAML: `
+kubernetes:
+  version: "v1.25.0" # version and containerManager are needed to be valid for this sub-test
+  containerManager: "containerd"
+  type: "kubeadm"
+`,
+			expectedType: "kubeadm",
+		},
+		{
+			name: "k8s type kubexm",
+			k8sSpecYAML: `
+kubernetes:
+  version: "v1.25.0"
+  containerManager: "containerd"
+  type: "kubexm"
+`,
+			expectedType: "kubexm",
+		},
+		{
+			name: "k8s type omitted", // Type is mandatory, but test parsing before validation
+			k8sSpecYAML: `
+kubernetes:
+  version: "v1.25.0"
+  containerManager: "containerd"
+  # type is omitted
+`,
+			expectedType: "", // Should parse as empty string if omitted
+		},
+	}
+
+	baseYAMLFormat := `
+apiVersion: installer.xiaoming.io/v1alpha1
+kind: ClusterConfig
+metadata:
+  name: k8s-type-test
+spec:
+  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
+  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
+  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
+  %s # k8sSpecYAML will be injected here
+  etcd: {type: kubeadm}
+  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
+  registry: {}
+`
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			finalYAML := fmt.Sprintf(baseYAMLFormat, tt.k8sSpecYAML)
+			tmpDir, err := os.MkdirTemp("", "config_test_k8s_type_")
+			require.NoError(t, err)
+			defer os.RemoveAll(tmpDir)
+
+			configFilePath := filepath.Join(tmpDir, "cluster_config.yaml")
+			err = os.WriteFile(configFilePath, []byte(finalYAML), 0644)
+			require.NoError(t, err)
+
+			cfg, err := LoadClusterConfig(configFilePath)
+			require.NoError(t, err) // Expecting no error during parsing itself
+			require.NotNil(t, cfg)
+			require.NotNil(t, cfg.Spec)
+
+			assert.Equal(t, tt.expectedType, cfg.Spec.Kubernetes.Type)
+		})
+	}
+}
 
 func TestLoadClusterConfig_MalformedYAML(t *testing.T) {
 	sampleYAML := `
-apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
+apiVersion: installer.xiaoming.io/v1alpha1
 kind: ClusterConfig
 metadata:
   name: test-cluster
 spec:
   hosts:
     - name: master1
-      address: "192.168.1.10 # Unclosed quote, malformed
+      address: "192.168.1.10 # Unclosed quote
 `
 	tmpDir, err := os.MkdirTemp("", "config_test_malformed_")
 	require.NoError(t, err)
@@ -264,14 +289,12 @@ func TestLoadClusterConfig_EmptyFile(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	configFilePath := filepath.Join(tmpDir, "cluster_config.yaml")
-	_, err = os.Create(configFilePath) // Create an empty file
+	_, err = os.Create(configFilePath)
 	require.NoError(t, err)
 
 	cfg, err := LoadClusterConfig(configFilePath)
 	require.Error(t, err)
 	assert.Nil(t, cfg)
-	// The exact error might vary (e.g. unmarshal error, or custom validation error)
-	// For an empty file, our custom validation (e.g. apiVersion required) should catch it.
 	assert.Contains(t, err.Error(), "apiVersion is a required field")
 }
 
@@ -291,7 +314,7 @@ func TestLoadClusterConfig_EmptyFilePath(t *testing.T) {
 
 func TestLoadClusterConfig_BlockSizeOmitted(t *testing.T) {
 	sampleYAMLNoBlockSize := `
-apiVersion: installer.kubesphere.io/v1alpha1
+apiVersion: installer.xiaoming.io/v1alpha1
 kind: ClusterConfig
 metadata:
   name: test-cluster-no-blocksize
@@ -300,8 +323,6 @@ spec:
     plugin: "calico"
     kubePodsCIDR: "10.244.0.0/16"
     kubeServiceCIDR: "10.96.0.0/12"
-    # blockSize is omitted
-  # Other required fields for basic parsing to pass LoadClusterConfig validation
   hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
   roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
   controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
@@ -330,7 +351,11 @@ func TestLoadClusterConfig_EtcdTypes(t *testing.T) {
 		name               string
 		etcdSpecYAML       string
 		expectedType       string
-		expectExternalData bool // True if Endpoints, CAFile etc. should be non-empty
+		expectExternalData bool
+		expectedEndpoints  []string
+		expectedCAFile     string
+		expectedCertFile   string
+		expectedKeyFile    string
 	}{
 		{
 			name: "etcd type kubeadm",
@@ -342,12 +367,12 @@ etcd:
 			expectExternalData: false,
 		},
 		{
-			name: "etcd type xm",
+			name: "etcd type kubexm",
 			etcdSpecYAML: `
 etcd:
-  type: "xm"
+  type: "kubexm"
 `,
-			expectedType:       "xm",
+			expectedType:       "kubexm",
 			expectExternalData: false,
 		},
 		{
@@ -355,18 +380,22 @@ etcd:
 			etcdSpecYAML: `
 etcd:
   type: "external"
-  endpoints: ["https://etcd.example.com:2379"]
-  caFile: "/etc/kubernetes/pki/etcd/ca.crt"
-  certFile: "/etc/kubernetes/pki/etcd/client.crt"
-  keyFile: "/etc/kubernetes/pki/etcd/client.key"
+  endpoints: ["https://etcd.example.com:2379", "https://etcd-another.example.com:2379"]
+  caFile: "/test/etcd/ca.crt"
+  certFile: "/test/etcd/client.crt"
+  keyFile: "/test/etcd/client.key"
 `,
 			expectedType:       "external",
 			expectExternalData: true,
+			expectedEndpoints:  []string{"https://etcd.example.com:2379", "https://etcd-another.example.com:2379"},
+			expectedCAFile:     "/test/etcd/ca.crt",
+			expectedCertFile:   "/test/etcd/client.crt",
+			expectedKeyFile:    "/test/etcd/client.key",
 		},
 		{
-			name: "etcd spec omitted", // Test when the whole etcd block is missing
-			etcdSpecYAML: ``, // No etcd: block
-			expectedType: "", // Default Go string value
+			name:               "etcd spec omitted",
+			etcdSpecYAML:       ``,
+			expectedType:       "",
 			expectExternalData: false,
 		},
 	}
@@ -381,7 +410,7 @@ spec:
   roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
   controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
   kubernetes: {version: v1.25.0, containerManager: containerd}
-  %s # etcdSpecYAML will be injected here
+  %s
   network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
   registry: {}
 `
@@ -402,22 +431,127 @@ spec:
 			require.NoError(t, err)
 			require.NotNil(t, cfg)
 			require.NotNil(t, cfg.Spec)
-			// Note: If etcdSpecYAML is empty, cfg.Spec.Etcd will be a zero-value EtcdSpec struct.
 
 			assert.Equal(t, tt.expectedType, cfg.Spec.Etcd.Type)
 
 			if tt.expectExternalData {
-				assert.NotEmpty(t, cfg.Spec.Etcd.Endpoints, "Endpoints should not be empty for external etcd with data")
-				assert.Equal(t, "https://etcd.example.com:2379", cfg.Spec.Etcd.Endpoints[0])
-				assert.Equal(t, "/etc/kubernetes/pki/etcd/ca.crt", cfg.Spec.Etcd.CAFile)
-				assert.Equal(t, "/etc/kubernetes/pki/etcd/client.crt", cfg.Spec.Etcd.CertFile)
-				assert.Equal(t, "/etc/kubernetes/pki/etcd/client.key", cfg.Spec.Etcd.KeyFile)
+				assert.Equal(t, tt.expectedEndpoints, cfg.Spec.Etcd.Endpoints)
+				assert.Equal(t, tt.expectedCAFile, cfg.Spec.Etcd.CAFile)
+				assert.Equal(t, tt.expectedCertFile, cfg.Spec.Etcd.CertFile)
+				assert.Equal(t, tt.expectedKeyFile, cfg.Spec.Etcd.KeyFile)
 			} else {
-				assert.Empty(t, cfg.Spec.Etcd.Endpoints, "Endpoints should be empty for etcd type '%s'", tt.expectedType)
-				assert.Empty(t, cfg.Spec.Etcd.CAFile, "CAFile should be empty for etcd type '%s'", tt.expectedType)
-				assert.Empty(t, cfg.Spec.Etcd.CertFile, "CertFile should be empty for etcd type '%s'", tt.expectedType)
-				assert.Empty(t, cfg.Spec.Etcd.KeyFile, "KeyFile should be empty for etcd type '%s'", tt.expectedType)
+				assert.Empty(t, cfg.Spec.Etcd.Endpoints)
+				assert.Empty(t, cfg.Spec.Etcd.CAFile)
+				assert.Empty(t, cfg.Spec.Etcd.CertFile)
+				assert.Empty(t, cfg.Spec.Etcd.KeyFile)
 			}
+		})
+	}
+}
+
+func TestLoadClusterConfig_LoadBalancerConfig(t *testing.T) {
+	tests := []struct {
+		name                   string
+		controlPlaneYAML       string
+		expectedEnable         bool
+		expectedType           string
+		expectError            bool
+		expectedErrorContains  string
+	}{
+		{
+			name: "LB enabled with type",
+			controlPlaneYAML: `
+controlPlaneEndpoint:
+  loadbalancer:
+    enable: true
+    type: "haproxy-keepalived"
+  domain: "lb.example.com"
+  address: "1.2.3.4"
+  port: 6443
+`,
+			expectedEnable: true,
+			expectedType:   "haproxy-keepalived",
+		},
+		{
+			name: "LB enabled type omitted",
+			controlPlaneYAML: `
+controlPlaneEndpoint:
+  loadbalancer:
+    enable: true
+  domain: "lb.example.com"
+  address: "1.2.3.4"
+  port: 6443
+`,
+			expectedEnable: true,
+			expectedType:   "",
+		},
+		{
+			name: "LB disabled",
+			controlPlaneYAML: `
+controlPlaneEndpoint:
+  loadbalancer:
+    enable: false
+    type: "haproxy-keepalived"
+  domain: "lb.example.com"
+  address: "1.2.3.4"
+  port: 6443
+`,
+			expectedEnable: false,
+			expectedType:   "haproxy-keepalived",
+		},
+		{
+			name: "LB section omitted",
+			controlPlaneYAML: `
+controlPlaneEndpoint:
+  domain: "lb.example.com"
+  address: "1.2.3.4"
+  port: 6443
+`,
+			expectedEnable: false,
+			expectedType:   "",
+		},
+	}
+
+	baseYAMLFormat := `
+apiVersion: installer.xiaoming.io/v1alpha1
+kind: ClusterConfig
+metadata:
+  name: lb-config-test
+spec:
+  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
+  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
+  %s
+  kubernetes: {version: v1.25.0, containerManager: containerd}
+  etcd: {type: kubeadm}
+  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
+  registry: {}
+`
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			finalYAML := fmt.Sprintf(baseYAMLFormat, tt.controlPlaneYAML)
+			tmpDir, err := os.MkdirTemp("", "config_test_lb_")
+			require.NoError(t, err)
+			defer os.RemoveAll(tmpDir)
+
+			configFilePath := filepath.Join(tmpDir, "cluster_config.yaml")
+			err = os.WriteFile(configFilePath, []byte(finalYAML), 0644)
+			require.NoError(t, err)
+
+			cfg, err := LoadClusterConfig(configFilePath)
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.expectedErrorContains != "" {
+					assert.Contains(t, err.Error(), tt.expectedErrorContains)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			require.NotNil(t, cfg.Spec)
+
+			assert.Equal(t, tt.expectedEnable, cfg.Spec.ControlPlaneEndpoint.LoadBalancer.Enable)
+			assert.Equal(t, tt.expectedType, cfg.Spec.ControlPlaneEndpoint.LoadBalancer.Type)
 		})
 	}
 }

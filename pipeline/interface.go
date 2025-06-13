@@ -1,12 +1,12 @@
 package pipeline
 
 import (
+	"github.com/mensylisir/xmcores/config" // For ClusterConfig
 	"github.com/mensylisir/xmcores/runtime"
 	"github.com/sirupsen/logrus"
 )
 
 // ParameterType defines the type of a parameter.
-// Using string for simplicity, could be an iota-based enum for stricter type checking.
 type ParameterType string
 
 const (
@@ -14,20 +14,20 @@ const (
 	ParamTypeInteger ParameterType = "integer"
 	ParamTypeBoolean ParameterType = "boolean"
 	ParamTypeMap     ParameterType = "map"
-	ParamTypeList    ParameterType = "list" // Could be list of strings, integers, etc.
+	ParamTypeList    ParameterType = "list"
 )
 
 // ParameterDefinition describes an expected parameter for a pipeline.
+// This might be used for CLI help generation or documentation, even if ClusterConfig is primary.
 type ParameterDefinition struct {
 	Name         string        `json:"name" yaml:"name"`
 	Type         ParameterType `json:"type" yaml:"type"`
 	Description  string        `json:"description" yaml:"description"`
 	Required     bool          `json:"required" yaml:"required"`
-	DefaultValue interface{}   `json:"defaultValue,omitempty" yaml:"defaultValue,omitempty"` // Optional default value
+	DefaultValue interface{}   `json:"defaultValue,omitempty" yaml:"defaultValue,omitempty"`
 }
 
-// Pipeline represents a high-level workflow consisting of multiple modules or tasks.
-// It defines its expected input parameters.
+// Pipeline represents a high-level workflow.
 type Pipeline interface {
 	// Name returns the unique name of the pipeline.
 	Name() string
@@ -36,14 +36,19 @@ type Pipeline interface {
 	Description() string
 
 	// ExpectedParameters returns a list of parameter definitions that this pipeline expects as input.
-	// This allows for validation, UI generation, and clear documentation of pipeline inputs.
-	ExpectedParameters() []ParameterDefinition
+	// This can be used for documentation, CLI help, or preliminary validation.
+	// It can return nil if parameters are solely defined by a typed config struct.
+	ExpectedParameters() []pipeline.ParameterDefinition // Retained for now
 
-	// Execute runs the pipeline's workflow.
-	// - rt: The runtime environment providing access to hosts, runners, etc.
-	// - configData: A map containing the actual parameter values provided for this pipeline execution,
-	//               matching the definitions from ExpectedParameters().
-	// - logger: A logger entry for structured logging within the pipeline.
-	// It returns an error if the pipeline execution fails.
-	Execute(rt runtime.Runtime, configData map[string]interface{}, logger *logrus.Entry) error
+	// Init prepares the pipeline for execution using the loaded ClusterConfig and initial runtime settings.
+	// It should validate parameters and can set up an operational runtime for the pipeline.
+	// - cfg: The fully parsed cluster configuration.
+	// - initialRuntime: Provides access to global settings like WorkDir, IgnoreError, Verbose, and the base logger.
+	// - logger: A logger entry pre-configured for this pipeline.
+	Init(cfg *config.ClusterConfig, initialRuntime runtime.Runtime, logger *logrus.Entry) error
+
+	// Execute runs the main logic of the pipeline.
+	// It should use the operational runtime and configurations prepared during Init.
+	// - logger: A logger entry pre-configured for this pipeline's execution phase.
+	Execute(logger *logrus.Entry) error
 }
