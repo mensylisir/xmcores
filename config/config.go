@@ -61,12 +61,11 @@ type KubernetesSpec struct {
 
 // EtcdSpec defines etcd configuration.
 type EtcdSpec struct {
-	Type string `yaml:"type"` // e.g., kubeadm, external
-	// Consider adding fields for external etcd endpoints if type is "external"
-	// ExternalEndpoints []string `yaml:"externalEndpoints,omitempty"`
-	// ExternalCertFile string `yaml:"externalCertFile,omitempty"`
-	// ExternalKeyFile string `yaml:"externalKeyFile,omitempty"`
-	// ExternalCAFile string `yaml:"externalCaFile,omitempty"`
+	Type      string   `yaml:"type"` // "kubeadm", "xm", "external"
+	Endpoints []string `yaml:"endpoints,omitempty"` // For type "external"
+	CAFile    string   `yaml:"caFile,omitempty"`    // For type "external"
+	CertFile  string   `yaml:"certFile,omitempty"`  // For type "external"
+	KeyFile   string   `yaml:"keyFile,omitempty"`   // For type "external"
 }
 
 // NetworkSpec defines network configuration.

@@ -1,44 +1,81 @@
-apiVersion: installer.kubesphere.io/v1alpha1
+apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
 kind: ClusterConfig
 metadata:
-  name: ks-installer-cluster
+  name: ks-installer-cluster # This will be the primary cluster name
 spec:
   hosts:
-    - {name: master1, address: 192.168.0.10, internalAddress: 192.168.0.10, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
-    - {name: master2, address: 192.168.0.11, internalAddress: 192.168.0.11, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
-    - {name: master3, address: 192.168.0.12, internalAddress: 192.168.0.12, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
-    - {name: worker1, address: 192.168.0.20, internalAddress: 192.168.0.20, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
-    - {name: worker2, address: 192.168.0.21, internalAddress: 192.168.0.21, port: 22, user: root, privateKeyPath: "/root/.ssh/id_rsa"}
+    # It's good practice for each host to have a unique name
+    - name: node1
+      address: "192.168.0.10"
+      internalAddress: "192.168.0.10" # Can be same as address if no separate internal net
+      port: 22
+      user: "root"
+      privateKeyPath: "/root/.ssh/id_rsa" # Ensure this key exists on the machine running xm
+    - name: node2
+      address: "192.168.0.11"
+      internalAddress: "192.168.0.11"
+      port: 22
+      user: "root"
+      privateKeyPath: "/root/.ssh/id_rsa"
+    - name: node3 # Example for a third node, perhaps a dedicated etcd or worker
+      address: "192.168.0.12"
+      internalAddress: "192.168.0.12"
+      port: 22
+      user: "root"
+      privateKeyPath: "/root/.ssh/id_rsa"
+    # Add more worker nodes as needed
+    - name: worker1 # Example worker
+      address: "192.168.0.20"
+      internalAddress: "192.168.0.20"
+      port: 22
+      user: "root"
+      privateKeyPath: "/root/.ssh/id_rsa"
+
 
   roleGroups:
-    etcd:
-      - master1
-      - master2
-      - master3
+    etcd: # For kubeadm stacked etcd, these should be control-plane nodes
+      - node1
+      - node2
+      - node3
     control-plane:
-      - master1
-      - master2
-      - master3
-    worker:
+      - node1
+      - node2
+      - node3
+    worker: # Worker nodes
       - worker1
-      - worker2
+      # Can also include control-plane nodes if they are to run workloads
+      # - node1
+      # - node2
+      # - node3
+    # loadbalancer: # Optional: if using internal load balancer managed by this tool
+      # - node1 # Example: run LB on one of the control plane nodes
 
   controlPlaneEndpoint:
-    domain: lb.kubesphere.local # Example domain
-    address: ""                # IP address can be empty if domain is used, or vice-versa. Pipeline should handle this logic.
+    domain: "lb.example.com"     # External access point domain name
+    address: "192.168.0.100"     # External LoadBalancer IP or Virtual IP (VIP)
+                                 # If using internal LB (e.g. on node1), this might be node1's IP or a VIP managed by keepalived
     port: 6443
 
   kubernetes:
-    version: v1.28.2
-    clusterName: my-k8s-cluster # Can be overridden by metadata.name or used as a fallback
+    version: "v1.28.2"
+    clusterName: "my-production-cluster" # User-friendly name, distinct from metadata.name if needed
     autoRenewCerts: true
-    containerManager: containerd
+    containerManager: "containerd"
 
   etcd:
-    type: kubeadm # 'kubeadm' for internal etcd, 'external' for user-provided
+    type: "kubeadm" # Default: etcd is stacked on control-plane nodes, managed by kubeadm
+    # Example for external etcd:
+    # type: "external"
+    # endpoints:
+    #   - "https://etcd1.example.com:2379"
+    #   - "https://etcd2.example.com:2379"
+    #   - "https://etcd3.example.com:2379"
+    # caFile: "/path/to/your/etcd-ca.crt"
+    # certFile: "/path/to/your/etcd-client.crt"
+    # keyFile: "/path/to/your/etcd-client.key"
 
   network:
-    plugin: calico # Options: calico, flannel, cilium, etc.
+    plugin: "calico"
     kubePodsCIDR: 10.244.0.0/16
     kubeServiceCIDR: 10.96.0.0/12
     blockSize: 26 # Example CNI block size, specific to some CNI plugins like Calico

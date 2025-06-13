@@ -153,15 +153,42 @@ func (p *InstallKubernetesPipeline) Execute(initialRuntime runtime.Runtime, conf
 	}
 	logger.Infof("Network plugin: %s, BlockSize: %s", networkPlugin, blockSizeStr)
 
+	// --- Etcd Module Preparation ---
+	logger.Infof("Preparing for Etcd setup. Configured Etcd type: %s", cfg.Spec.Etcd.Type)
+	if cfg.Spec.Etcd.Type == "external" {
+		logger.Infof("Using external etcd. Endpoints: %v", cfg.Spec.Etcd.Endpoints)
+		if cfg.Spec.Etcd.CAFile != "" {
+			logger.Infof("External etcd CAFile configured: %s", cfg.Spec.Etcd.CAFile)
+		}
+		if cfg.Spec.Etcd.CertFile != "" && cfg.Spec.Etcd.KeyFile != "" {
+			logger.Info("External etcd client certificate and key are configured.")
+		} else if cfg.Spec.Etcd.CertFile != "" || cfg.Spec.Etcd.KeyFile != "" {
+			logger.Warn("External etcd client certificate or key is partially configured. Both are usually needed.")
+		}
+	} else if cfg.Spec.Etcd.Type == "xm" {
+		logger.Info("Etcd type 'xm': This pipeline would perform binary installation and management of etcd.")
+	} else if cfg.Spec.Etcd.Type == "kubeadm" || cfg.Spec.Etcd.Type == "" { // Default to kubeadm if empty
+		logger.Info("Etcd type 'kubeadm' (or default): Etcd will be managed by kubeadm as stacked on control-plane nodes.")
+	} else {
+		logger.Warnf("Unknown Etcd type specified: '%s'. Proceeding as if 'kubeadm'.", cfg.Spec.Etcd.Type)
+	}
+	logger.Info("Executing EtcdModule (conceptual)...")
+	// etcdModule.Execute(pipelineRt, &cfg.Spec.Etcd, pipelineRt.RoleHosts()["etcd"], logger.WithField("module", "Etcd"))
+
+
+	// --- Other Conceptual Module Executions ---
 	if hosts, ok := pipelineRt.RoleHosts()["loadbalancer"]; ok && len(hosts) > 0 {
 		logger.Info("Executing LoadBalancerModule (conceptual)...")
+		// lbModule.Execute(pipelineRt, &cfg.Spec.ControlPlaneEndpoint, hosts, logger.WithField("module", "LoadBalancer"))
 	} else {
 		logger.Info("Skipping LoadBalancerModule: no hosts assigned to 'loadbalancer' role or role not defined.")
 	}
 
-	logger.Info("Executing EtcdModule (conceptual)...")
 	logger.Info("Executing ContainerRuntimeModule (conceptual)...")
+	// crModule.Execute(pipelineRt, &cfg.Spec, logger.WithField("module", "ContainerRuntime")) // Needs broader spec parts
+
 	logger.Info("Executing ControlPlaneModule (conceptual)...")
+	// cpModule.Execute(pipelineRt, &cfg.Spec, logger.WithField("module", "ControlPlane")) // Needs broader spec parts
 	logger.Info("Executing WorkerNodeJoinModule (conceptual)...")
 	logger.Info("Executing CNIModule (conceptual)...")
 	logger.Info("Executing RegistryModule (conceptual)...")

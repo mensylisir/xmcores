@@ -42,79 +42,101 @@ Global operational flags can also be used:
 
 ### Configuration File (`config.yaml`)
 
-The `config.yaml` file defines the cluster specification. Below is an example structure for `Kind: Cluster`:
+The `config.yaml` file defines the cluster specification. Below is an example structure for `kind: Cluster`:
 
 ```yaml
-apiVersion: xms.xiaoming.io/v1 # Example API version
-kind: Cluster
+apiVersion: installer.xiaoming.io/v1alpha1 # Updated API version
+kind: Cluster # Defines the object type
 metadata:
-  name: my-k8s-cluster
+  name: my-k8s-cluster # Name of your cluster
 spec:
   hosts:
     - name: master01
-      address: 192.168.1.10
-      internalAddress: 192.168.1.10 # Or specific internal IP
+      address: 192.168.1.10       # External IP
+      internalAddress: 192.168.1.10 # Internal IP, can be same as address
       port: 22
       user: root
-      # password: "your_password" # Alternatively, use privateKeyPath
-      privateKeyPath: "/path/to/your/ssh/key"
+      # password: "your_password" # Use instead of privateKeyPath if preferred
+      privateKeyPath: "/path/to/your/ssh/id_rsa" # Path to SSH private key
     - name: worker01
       address: 192.168.1.20
-      # ... other host details ...
-    # Define all hosts (masters, workers, etcd, loadbalancers) here
+      internalAddress: 192.168.1.20
+      port: 22
+      user: root
+      privateKeyPath: "/path/to/your/ssh/id_rsa"
+    # Define all hosts (masters, workers, etcd nodes if external, loadbalancers) here
 
   roleGroups:
-    etcd:
-      - master01 # Example: etcd colocated on master01
-    control-plane:
+    etcd: # Hosts for the etcd cluster. For kubeadm stacked type, these are control-plane nodes.
       - master01
-    worker:
+    control-plane: # Hosts for Kubernetes control plane components
+      - master01
+    worker: # Hosts for Kubernetes worker nodes
       - worker01
-    loadbalancer: # Optional: for HA control plane
-      - master01 # Example: LB also on master01, or dedicated hosts
+    # loadbalancer: # Optional: for HA control plane if using internal LB solution
+    #   - master01 # Can be co-located or dedicated hosts
 
   controlPlaneEndpoint:
-    # internalLoadbalancer: haproxy # If using the loadbalancer role
-    domain: "k8s-api.your.domain" # DNS name for the API server
-    address: "192.168.1.10" # VIP or IP of the primary control plane node if no LB
+    # domain: "k8s-api.example.local" # DNS name for the API server (recommended)
+    address: "192.168.1.10" # VIP or IP of the (first) control plane node if no LB/domain
     port: 6443
 
   kubernetes:
     version: "v1.28.2" # Specify target Kubernetes version
-    clusterName: "production-cluster"
+    clusterName: "production-cluster" # A user-friendly name for the cluster
     autoRenewCerts: true
     containerManager: "containerd" # Currently focused on containerd
 
   network:
-    plugin: "calico" # Specify CNI plugin (e.g., calico, flannel)
+    plugin: "calico" # Specify CNI plugin (e.g., calico, flannel, cilium)
     kubePodsCIDR: "10.244.0.0/16"
     kubeServiceCIDR: "10.96.0.0/12"
     blockSize: 26 # Optional: CNI-specific block size (e.g., for Calico)
     multusCNI:
-      enabled: false
+      enabled: false # Set to true to enable Multus CNI
 
-  registry: # Optional: Configuration for a private registry
-    # type: "harbor"
-    # privateRegistry: "your.private.registry:5000"
-    # auths:
-    #   "your.private.registry:5000":
-    #     username: "user"
-    #     password: "password"
-    # insecureRegistries:
-    #   - "your.private.registry:5000"
+  registry: # Optional: Configuration for a private or mirrored container registry
+    # type: "docker" # Type of registry, e.g., docker, harbor (for future specific handling)
+    privateRegistry: "your.private.registry:5000" # Domain of your private registry
+    # namespaceOverride: "my-images" # Optional: Override the default namespace for images (e.g. k8s.gcr.io -> your.private.registry/my-images)
+    auths: # Credentials for private registries
+      "your.private.registry:5000":
+        username: "user"
+        password: "password"
+    registryMirrors: # List of registry mirrors to configure on container runtime
+      - "https://mirror.example.com"
+    insecureRegistries: # List of registries to allow insecure (HTTP) access or skip TLS verify
+      - "your.private.registry:5000" # Often needed if private registry uses self-signed certs
 
-  # etcd: # Optional: Specific etcd settings if not using default embedded
-    # type: "external" # or "stacked" (default)
-    # ... etcd specific params ...
+  etcd:
+    type: "kubeadm" # Default and recommended for most cases. Etcd is stacked on control-plane nodes.
+    # For an external etcd cluster, use type "external" and provide details:
+    # type: "external"
+    # endpoints:
+    #   - "https://etcd1.example.com:2379"
+    #   - "https://etcd2.example.com:2379"
+    #   - "https://etcd3.example.com:2379"
+    # caFile: "/path/to/external/etcd-ca.crt"
+    # certFile: "/path/to/external/etcd-client.crt"
+    # keyFile: "/path/to/external/etcd-client.key"
+    # The "xm" type for etcd is reserved for future use where xmcores might manage a separate etcd cluster.
+
+  # internalLoadbalancer: "haproxy" # Optional: if xmcores should deploy an internal LB (like haproxy+keepalived)
+                                 # If empty, assumes an external LB or a single control-plane node setup.
 ```
 
 Key `spec` fields:
 - `hosts`: A list of all machines involved in the cluster, with their SSH details.
 - `roleGroups`: Assigns roles (like `etcd`, `control-plane`, `worker`, `loadbalancer`) to the hosts defined in `spec.hosts`.
-- `controlPlaneEndpoint`: Defines how to access the Kubernetes API server.
-- `kubernetes`: Kubernetes-specific settings like version and container manager.
-- `network`: CNI plugin configuration, CIDRs, and optional `blockSize`.
-- `registry`: Optional settings for using a private container registry.
+- `controlPlaneEndpoint`: Defines how to access the Kubernetes API server (via domain or direct IP/VIP).
+- `kubernetes`: Kubernetes-specific settings like version, cluster name, and container manager.
+- `network`: CNI plugin configuration (e.g., Calico, Flannel), Pod and Service CIDRs, and optional CNI-specific settings like `blockSize`.
+- `registry`: Optional settings for using private or mirrored container registries, including authentication.
+- `etcd`: Configuration for the etcd cluster.
+    - `type`: Defines the etcd deployment strategy:
+        - `"kubeadm"`: (Default) Etcd is managed by kubeadm and typically stacked on control-plane nodes.
+        - `"xm"`: (Future) Etcd cluster managed by `xmcores` itself (deployed as separate binaries).
+        - `"external"`: Use a pre-existing, external etcd cluster. Requires specifying `endpoints`, and TLS certificate paths (`caFile`, `certFile`, `keyFile`).
 
 ## Development
 

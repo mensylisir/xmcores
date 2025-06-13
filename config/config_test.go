@@ -10,7 +10,7 @@ import (
 )
 
 const sampleClusterConfigYAML = `
-apiVersion: installer.kubesphere.io/v1alpha1
+apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
 kind: ClusterConfig
 metadata:
   name: test-cluster
@@ -45,7 +45,13 @@ spec:
     autoRenewCerts: true
     containerManager: "containerd"
   etcd:
-    type: "kubeadm"
+    type: "external" # Testing external etcd type
+    endpoints:
+      - "https://etcd1.example.com:2379"
+      - "https://etcd2.example.com:2379"
+    caFile: "/path/to/etcd/external/ca.crt"
+    certFile: "/path/to/etcd/external/client.crt"
+    keyFile: "/path/to/etcd/external/client.key"
   network:
     plugin: "calico"
     kubePodsCIDR: "10.244.0.0/16"
@@ -123,7 +129,13 @@ func TestLoadClusterConfig_Success(t *testing.T) {
 	assert.Equal(t, "containerd", spec.Kubernetes.ContainerManager)
 
 	// Etcd
-	assert.Equal(t, "kubeadm", spec.Etcd.Type)
+	assert.Equal(t, "external", spec.Etcd.Type)
+	require.Len(t, spec.Etcd.Endpoints, 2)
+	assert.Equal(t, "https://etcd1.example.com:2379", spec.Etcd.Endpoints[0])
+	assert.Equal(t, "https://etcd2.example.com:2379", spec.Etcd.Endpoints[1])
+	assert.Equal(t, "/path/to/etcd/external/ca.crt", spec.Etcd.CAFile)
+	assert.Equal(t, "/path/to/etcd/external/client.crt", spec.Etcd.CertFile)
+	assert.Equal(t, "/path/to/etcd/external/client.key", spec.Etcd.KeyFile)
 
 	// Network
 	assert.Equal(t, "calico", spec.Network.Plugin)
@@ -160,20 +172,44 @@ func TestLoadClusterConfig_ValidationErrors(t *testing.T) {
 		{
 			name: "APIVersion missing",
 			yamlContent: `kind: ClusterConfig
-metadata: {name: test}`,
+metadata: {name: test}
+spec: # Add minimal spec to pass other validations if LoadClusterConfig becomes stricter
+  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
+  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
+  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
+  kubernetes: {version: v1.25.0, containerManager: containerd}
+  etcd: {type: kubeadm}
+  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
+  registry: {}`,
 			expectedError: "apiVersion is a required field",
 		},
 		{
 			name: "Kind missing",
-			yamlContent: `apiVersion: installer.kubesphere.io/v1alpha1
-metadata: {name: test}`,
+			yamlContent: `apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
+metadata: {name: test}
+spec:
+  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
+  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
+  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
+  kubernetes: {version: v1.25.0, containerManager: containerd}
+  etcd: {type: kubeadm}
+  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
+  registry: {}`,
 			expectedError: "kind is a required field",
 		},
 		{
 			name: "Metadata.name missing",
-			yamlContent: `apiVersion: installer.kubesphere.io/v1alpha1
+			yamlContent: `apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
 kind: ClusterConfig
-metadata: {}`,
+metadata: {}
+spec:
+  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
+  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
+  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
+  kubernetes: {version: v1.25.0, containerManager: containerd}
+  etcd: {type: kubeadm}
+  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
+  registry: {}`,
 			expectedError: "metadata.name is a required field",
 		},
 	}
@@ -199,7 +235,7 @@ metadata: {}`,
 
 func TestLoadClusterConfig_MalformedYAML(t *testing.T) {
 	sampleYAML := `
-apiVersion: installer.kubesphere.io/v1alpha1
+apiVersion: installer.xiaoming.io/v1alpha1 # Updated APIVersion
 kind: ClusterConfig
 metadata:
   name: test-cluster
@@ -287,4 +323,101 @@ spec:
 	require.NotNil(t, cfg.Spec)
 	require.NotNil(t, cfg.Spec.Network)
 	assert.Nil(t, cfg.Spec.Network.BlockSize, "BlockSize should be nil when omitted from YAML")
+}
+
+func TestLoadClusterConfig_EtcdTypes(t *testing.T) {
+	tests := []struct {
+		name               string
+		etcdSpecYAML       string
+		expectedType       string
+		expectExternalData bool // True if Endpoints, CAFile etc. should be non-empty
+	}{
+		{
+			name: "etcd type kubeadm",
+			etcdSpecYAML: `
+etcd:
+  type: "kubeadm"
+`,
+			expectedType:       "kubeadm",
+			expectExternalData: false,
+		},
+		{
+			name: "etcd type xm",
+			etcdSpecYAML: `
+etcd:
+  type: "xm"
+`,
+			expectedType:       "xm",
+			expectExternalData: false,
+		},
+		{
+			name: "etcd type external with data",
+			etcdSpecYAML: `
+etcd:
+  type: "external"
+  endpoints: ["https://etcd.example.com:2379"]
+  caFile: "/etc/kubernetes/pki/etcd/ca.crt"
+  certFile: "/etc/kubernetes/pki/etcd/client.crt"
+  keyFile: "/etc/kubernetes/pki/etcd/client.key"
+`,
+			expectedType:       "external",
+			expectExternalData: true,
+		},
+		{
+			name: "etcd spec omitted", // Test when the whole etcd block is missing
+			etcdSpecYAML: ``, // No etcd: block
+			expectedType: "", // Default Go string value
+			expectExternalData: false,
+		},
+	}
+
+	baseYAMLFormat := `
+apiVersion: installer.xiaoming.io/v1alpha1
+kind: ClusterConfig
+metadata:
+  name: etcd-type-test
+spec:
+  hosts: [{name: m1, address: "1.1.1.1", internalAddress: "1.1.1.1", user: "u"}]
+  roleGroups: {etcd: [m1], control-plane: [m1], worker: [m1]}
+  controlPlaneEndpoint: {address: "1.1.1.1", port: 6443}
+  kubernetes: {version: v1.25.0, containerManager: containerd}
+  %s # etcdSpecYAML will be injected here
+  network: {plugin: calico, kubePodsCIDR: "10.0.0.0/16", kubeServiceCIDR: "10.1.0.0/16"}
+  registry: {}
+`
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			finalYAML := fmt.Sprintf(baseYAMLFormat, tt.etcdSpecYAML)
+
+			tmpDir, err := os.MkdirTemp("", "config_test_etcd_types_")
+			require.NoError(t, err)
+			defer os.RemoveAll(tmpDir)
+
+			configFilePath := filepath.Join(tmpDir, "cluster_config.yaml")
+			err = os.WriteFile(configFilePath, []byte(finalYAML), 0644)
+			require.NoError(t, err)
+
+			cfg, err := LoadClusterConfig(configFilePath)
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			require.NotNil(t, cfg.Spec)
+			// Note: If etcdSpecYAML is empty, cfg.Spec.Etcd will be a zero-value EtcdSpec struct.
+
+			assert.Equal(t, tt.expectedType, cfg.Spec.Etcd.Type)
+
+			if tt.expectExternalData {
+				assert.NotEmpty(t, cfg.Spec.Etcd.Endpoints, "Endpoints should not be empty for external etcd with data")
+				assert.Equal(t, "https://etcd.example.com:2379", cfg.Spec.Etcd.Endpoints[0])
+				assert.Equal(t, "/etc/kubernetes/pki/etcd/ca.crt", cfg.Spec.Etcd.CAFile)
+				assert.Equal(t, "/etc/kubernetes/pki/etcd/client.crt", cfg.Spec.Etcd.CertFile)
+				assert.Equal(t, "/etc/kubernetes/pki/etcd/client.key", cfg.Spec.Etcd.KeyFile)
+			} else {
+				assert.Empty(t, cfg.Spec.Etcd.Endpoints, "Endpoints should be empty for etcd type '%s'", tt.expectedType)
+				assert.Empty(t, cfg.Spec.Etcd.CAFile, "CAFile should be empty for etcd type '%s'", tt.expectedType)
+				assert.Empty(t, cfg.Spec.Etcd.CertFile, "CertFile should be empty for etcd type '%s'", tt.expectedType)
+				assert.Empty(t, cfg.Spec.Etcd.KeyFile, "KeyFile should be empty for etcd type '%s'", tt.expectedType)
+			}
+		})
+	}
 }
