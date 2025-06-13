@@ -11,6 +11,9 @@ type CliArgs struct {
 	SecurityEnhancement bool   // If true, apply additional security enhancements
 	SkipInstallAddons   bool   // If true, skip installing default addons
 
+	Debug               bool   // Corresponds to verbose logging (set by -v or --log-level=debug)
+	IgnoreErr           bool   // Corresponds to --ignore-errors global flag
+
 	// Future flags can be added here, for example:
 	// Force           bool   // Force operations
 	// Offline         bool   // Indicate offline mode, might affect how resources are fetched

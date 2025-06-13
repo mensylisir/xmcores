@@ -45,11 +45,10 @@ spec:
 
   controlPlaneEndpoint:
     loadbalancer:
-      enable: true # Set to true to enable load balancing for the control plane
-      type: "haproxy-keepalived" # Options: "haproxy-keepalived" (if managed by xmcores), "external" (for user-provided LB)
-    domain: "k8s-api.example.local"     # DNS name for the VIP or external LB
-    address: "192.168.0.100"          # VIP for managed LB, or address of external LB. Interpreted by pipeline.
-                                      # Can be empty if domain is resolvable and preferred.
+      enable: true
+      type: "haproxy-keepalived" # Options: "haproxy-keepalived" (internal), "external"
+    domain: "k8s-api.example.local"
+    address: "192.168.0.100" # VIP or External LB IP
     port: 6443
 
   kubernetes:
@@ -57,20 +56,20 @@ spec:
     clusterName: "my-production-cluster"
     autoRenewCerts: true
     containerManager: "containerd"
-    type: "kubeadm" # Installation type: "kubeadm" (uses kubeadm) or "kubexm" (binary deployment, future)
+    type: "kubeadm" # Options: "kubeadm", "kubexm" (future)
 
   etcd:
-    type: "kubeadm" # Default: etcd is stacked on control-plane nodes, managed by kubeadm.
-    # Other options for type:
-    # type: "kubexm"   # xmcores will install and manage a dedicated etcd cluster on the 'etcd' role hosts.
-    # type: "external" # Connect to an existing external etcd cluster.
-    # Example for external etcd:
+    type: "kubeadm" # Options: "kubeadm" (stacked), "kubexm" (xmcores managed), "external"
+    # Example for "kubexm" (would typically run on 'etcd' role hosts):
+    # type: "kubexm"
+    # Example for "external":
+    # type: "external"
     # endpoints:
     #   - "https://etcd1.example.com:2379"
     #   - "https://etcd2.example.com:2379"
-    # caFile: "/path/to/external-etcd-ca.crt"
-    # certFile: "/path/to/external-etcd-client.crt"
-    # keyFile: "/path/to/external-etcd-client.key"
+    # caFile: "/opt/xmcores/pki/etcd/ca.pem"
+    # certFile: "/opt/xmcores/pki/etcd/client.pem"
+    # keyFile: "/opt/xmcores/pki/etcd/client-key.pem"
 
   network:
     plugin: "calico"

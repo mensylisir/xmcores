@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mensylisir/xmcores/pipeline/ending"
+	"github.com/mensylisir/xmcores/pipeline/ending" // For ModuleResult if Run is overridden
 	krt "github.com/mensylisir/xmcores/runtime"
 	"github.com/mensylisir/xmcores/step/runcmd"
 	"github.com/mensylisir/xmcores/task"
@@ -21,50 +21,49 @@ type RunCommandTaskSpec struct {
 
 // RunCommandTask executes one or more shell commands.
 type RunCommandTask struct {
-	task.BaseTask // Embed BaseTask
-	// taskSpec is inherited from BaseTask and will be type-asserted
+	*task.BaseTask // Embed pointer to BaseTask
+	// Store the processed commands if needed after Init, though BaseTask.steps will hold them.
+	// commandsToExecute []string
 }
 
 // NewRunCommandTask creates a new task that executes specified commands.
-// The actual commands are provided via taskSpec to the Init/Default methods.
-// Name and description can be default and overridden by spec.
 func NewRunCommandTask(name, description string) task.Task {
-	t := &RunCommandTask{}
-	t.NameField = name
-	t.DescriptionField = description
-	t.steps = make([]task.Step, 0) // Initialize steps slice from BaseTask
-	return t
+	// Initialize BaseTask with name and description
+	// These might be overridden in Default/Init if spec provides them.
+	base := task.NewBaseTask(name, description)
+	return &RunCommandTask{
+		BaseTask: base,
+	}
 }
 
 // Default stores runtime, logger, and the taskSpec.
-func (t *RunCommandTask) Default(runtime *krt.KubeRuntime, moduleCache interface{}, taskCache interface{}) error {
-	if err := t.BaseTask.Default(runtime, moduleCache, taskCache); err != nil {
+func (t *RunCommandTask) Default(runtime *krt.ClusterRuntime, taskSpec interface{}, moduleCache interface{}, taskCache interface{}) error {
+	// Call BaseTask's Default to store runtime and raw taskSpec
+	if err := t.BaseTask.Default(runtime, taskSpec, moduleCache, taskCache); err != nil {
 		return err
 	}
-	// Logger and Runtime are set by BaseTask.Default
-	// Concrete task needs to set its own logger for proper scoping if BaseTask.Default doesn't.
-	// The current BaseTask.Default sets a basic logger. We can refine it here.
-	t.Logger = runtime.Log.WithFields(logrus.Fields{"task": t.Name(), "type": "RunCommandTask"})
-	t.Logger.Info("RunCommandTask Default completed.")
+	// Set up a logger scoped for this specific task instance, overriding the one from BaseTask.Default
+	t.Logger = runtime.Log.WithFields(logrus.Fields{"task": t.NameField, "type": "RunCommandTask"})
+	t.Logger.Info("RunCommandTask Default completed: runtime, taskSpec, and logger set.")
 	return nil
 }
 
-// Init processes the taskSpec to create and initialize steps.
-// It's called by the Module after Default and AutoAssert.
+// Init processes the stored taskSpec to create and initialize steps.
 func (t *RunCommandTask) Init() error {
-	// Call BaseTask's Init (currently a placeholder, but good practice)
+	// Call BaseTask's Init (currently a placeholder, but good practice for future)
 	if err := t.BaseTask.Init(); err != nil {
 		return err
 	}
 	t.Logger.Info("RunCommandTask Init called - assembling steps.")
 
 	if t.TaskSpec == nil {
-		return fmt.Errorf("taskSpec not set for RunCommandTask '%s' (must be set in module's Init after task's Default)", t.Name())
+		return fmt.Errorf("taskSpec not set for RunCommandTask '%s' (must be set in Default)", t.NameField)
 	}
 
 	var commandsToRun []string
-	taskInstanceName := t.Name()
-	taskInstanceDesc := t.Description()
+	// Use NameField from BaseTask, which might have been set by New or from spec.
+	taskInstanceName := t.NameField
+	taskInstanceDesc := t.DescriptionField
 
 	switch spec := t.TaskSpec.(type) {
 	case string:
@@ -88,40 +87,43 @@ func (t *RunCommandTask) Init() error {
 			return fmt.Errorf("RunCommandTaskSpec must contain at least one command")
 		}
 	default:
-		return fmt.Errorf("invalid taskSpec type for RunCommandTask: expected string, []string, or *RunCommandTaskSpec, got %T", t.TaskSpec)
+		return fmt.Errorf("invalid taskSpec type for RunCommandTask '%s': expected string, []string, or *RunCommandTaskSpec, got %T", t.NameField, t.TaskSpec)
 	}
 
 	// Update NameField and DescriptionField if they were derived or set by spec
 	t.NameField = taskInstanceName
 	t.DescriptionField = taskInstanceDesc
 	// Re-scope logger if name changed
-	t.Logger = t.Runtime.Log.WithFields(logrus.Fields{"task": t.Name(), "type": "RunCommandTask"})
+	t.Logger = t.Runtime.Log.WithFields(logrus.Fields{"task": t.NameField, "type": "RunCommandTask"})
 
 
 	for i, cmdStr := range commandsToRun {
-		stepName := fmt.Sprintf("%s-step%d-%s", t.Name(), i+1, cmdToIdentifier(cmdStr, 10))
-		stepDesc := fmt.Sprintf("Execute command: %s", cmdStr)
+		stepName := fmt.Sprintf("%s-step%d-%s", t.NameField, i+1, cmdToIdentifier(cmdStr, 10))
+		stepDesc := fmt.Sprintf("Execute command: '%s'", cmdStr)
 
 		cmdStep := runcmd.NewRunCommandStep(stepName, stepDesc, cmdStr)
 
 		stepLogger := t.Logger.WithField("step", cmdStep.Name())
-		if err := cmdStep.Init(t.Runtime, stepLogger); err != nil { // Pass runtime from BaseTask
+		// Initialize the step using the Runtime stored in BaseTask
+		if err := cmdStep.Init(t.Runtime, stepLogger); err != nil {
 			return fmt.Errorf("failed to initialize step '%s' for command '%s': %w", stepName, cmdStr, err)
 		}
-		t.AddStep(cmdStep)
+		t.AddStep(cmdStep) // AddStep is a method of BaseTask
 	}
 
 	t.Logger.Infof("RunCommandTask initialized with %d command(s).", len(commandsToRun))
 	return nil
 }
 
-// cmdToIdentifier creates a short identifier from a command string.
+// cmdToIdentifier creates a short identifier from a command string for naming steps.
 func cmdToIdentifier(cmd string, maxLength int) string {
 	fs := strings.Fields(cmd)
 	if len(fs) > 0 {
 		name := strings.ToLower(fs[0])
+		// Basic sanitization, can be expanded
 		name = strings.ReplaceAll(name, "/", "_")
 		name = strings.ReplaceAll(name, ".", "_")
+		name = strings.ReplaceAll(name, ":", "_")
 		if len(name) > maxLength {
 			return name[:maxLength]
 		}
@@ -131,11 +133,12 @@ func cmdToIdentifier(cmd string, maxLength int) string {
 }
 
 // Slogan provides a specific slogan for RunCommandTask.
-func (t *RunCommandTask) Slogan() string {
-	return fmt.Sprintf("Executing command(s) for task: %s...", t.Name())
-}
+// BaseTask.Slogan() can be overridden if a more specific message is desired.
+// func (t *RunCommandTask) Slogan() string {
+// 	return fmt.Sprintf("Executing command(s) for task: %s...", t.NameField)
+// }
 
 // Run method is inherited from BaseTask.
-// Other methods like IsSkip, AutoAssert, Until, Steps, AddStep are inherited or overridden if needed.
-// Ensure this struct satisfies the task.Task interface by virtue of BaseTask + any overrides.
-var _ task.Task = (*RunCommandTask)(nil)
+// IsSkip, AutoAssert, Until, Steps are inherited from BaseTask and can be overridden if needed.
+
+var _ task.Task = (*RunCommandTask)(nil) // Verify interface implementation

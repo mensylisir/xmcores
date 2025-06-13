@@ -4,11 +4,11 @@
 
 ## Overview
 
-The tool uses a YAML configuration file, inspired by Kubernetes CRD patterns, to define the desired state of a cluster. Pipelines, composed of modules and steps, then act upon this configuration to achieve the desired state.
+The tool uses a YAML configuration file, inspired by Kubernetes CRD patterns, to define the desired state of a cluster. Pipelines, composed of modules and tasks (which in turn are composed of steps), then act upon this configuration to achieve the desired state.
 
 ## Current Status
 
-This project is under active development. The current focus is on building the foundational architecture for a Kubernetes installation pipeline.
+This project is under active development. The current focus is on building the foundational architecture for a Kubernetes installation pipeline and refining core component lifecycles.
 
 ## Getting Started (Conceptual)
 
@@ -38,172 +38,173 @@ Global operational flags can also be used:
 - `--log-level <level>`: Set log level (e.g., "debug", "info", "warn").
 - `-v, --verbose`: Enable verbose (debug) logging.
 - `--work-dir <path>`: Specify a working directory for temporary files (defaults to `./.xm_work_data`).
-- `--ignore-errors`: If set, the tool will attempt to continue execution even if some non-critical steps fail.
+- `--ignore-errors`: If set, the tool will attempt to continue execution even if some non-critical steps or module/task failures occur.
+- `--artifact <path>`: Path to an offline artifact (e.g., tarball).
+- `--skip-push-images`: Skip pushing images to a private registry.
+- `--deploy-local-storage`: Deploy a local storage provisioner.
+- `--install-packages`: Allow installation of OS packages (default true).
+- `--skip-pull-images`: Skip pulling images (assume pre-loaded).
+- `--security-enhancement`: Apply additional security enhancements.
+- `--skip-install-addons`: Skip installing default addons.
+
 
 ### Configuration File (`config.yaml`)
 
-The `config.yaml` file defines the cluster specification. Below is an example structure for `kind: Cluster`:
+The `config.yaml` file defines the cluster specification. Below is an example structure:
 
 ```yaml
-apiVersion: installer.xiaoming.io/v1alpha1 # Defines the API version for this configuration
-kind: Cluster # Specifies the object type as Cluster
+apiVersion: installer.xiaoming.io/v1alpha1
+kind: ClusterConfig # Changed from 'Cluster' to 'ClusterConfig' to match struct
 metadata:
-  name: my-k8s-cluster # Name of your cluster
+  name: my-k8s-cluster
 spec:
   hosts:
     - name: master01
-      address: 192.168.1.10       # External IP used for SSH
-      internalAddress: 192.168.1.10 # Internal IP, can be same as address
+      address: 192.168.1.10
+      internalAddress: 192.168.1.10
       port: 22
       user: root
-      # password: "your_password" # Use instead of privateKeyPath if preferred
-      privateKeyPath: "/path/to/your/ssh/id_rsa" # Path to SSH private key
+      privateKeyPath: "/path/to/your/ssh/id_rsa"
     - name: worker01
       address: 192.168.1.20
       internalAddress: 192.168.1.20
       port: 22
       user: root
       privateKeyPath: "/path/to/your/ssh/id_rsa"
-    # Define all hosts (masters, workers, etcd nodes if external, loadbalancers) here
 
   roleGroups:
-    etcd: # Hosts for the etcd cluster. For kubeadm stacked type, these are control-plane nodes.
+    etcd:
       - master01
-    control-plane: # Hosts for Kubernetes control plane components
+    control-plane:
       - master01
-    worker: # Hosts for Kubernetes worker nodes
+    worker:
       - worker01
-    # loadbalancer: # Optional: for HA control plane if using internal LB solution
-    #   - master01 # Can be co-located or dedicated hosts
+    # loadbalancer: # Optional
+    #   - master01
 
   controlPlaneEndpoint:
     loadbalancer:
-      enable: true # Set to true to enable load balancing for the control plane
-      type: "haproxy-keepalived" # Options: "haproxy-keepalived" (if managed by xmcores), "external" (for user-provided LB)
-    domain: "k8s-api.example.local"     # DNS name for the VIP or external LB
-    address: "192.168.1.100"          # VIP for managed LB, or address of external LB. Interpreted by pipeline.
-                                      # Can be empty if domain is resolvable and preferred.
+      enable: true
+      type: "haproxy-keepalived" # Options: "haproxy-keepalived", "external"
+    domain: "k8s-api.example.local"
+    address: "192.168.1.100" # VIP or External LB IP
     port: 6443
 
   kubernetes:
-    version: "v1.28.2" # Specify target Kubernetes version
-    clusterName: "production-cluster" # A user-friendly name for the cluster
+    version: "v1.28.2"
+    clusterName: "production-cluster"
     autoRenewCerts: true
-    containerManager: "containerd" # Currently focused on containerd
-    type: "kubeadm" # Installation type: "kubeadm" (uses kubeadm) or "kubexm" (binary deployment, future)
+    containerManager: "containerd"
+    type: "kubeadm" # Options: "kubeadm", "kubexm" (future)
 
   network:
-    plugin: "calico" # Specify CNI plugin (e.g., calico, flannel, cilium)
+    plugin: "calico"
     kubePodsCIDR: "10.244.0.0/16"
     kubeServiceCIDR: "10.96.0.0/12"
-    blockSize: 26 # Optional: CNI-specific block size (e.g., for Calico)
+    blockSize: 26 # Optional for Calico
     multusCNI:
-      enabled: false # Set to true to enable Multus CNI
+      enabled: false
 
-  registry: # Optional: Configuration for a private or mirrored container registry
-    # type: "docker" # Type of registry, e.g., docker, harbor (for future specific handling)
-    privateRegistry: "your.private.registry:5000" # Domain of your private registry
-    # namespaceOverride: "my-images" # Optional: Override the default namespace for images
-    auths: # Credentials for private registries
+  registry:
+    privateRegistry: "your.private.registry:5000"
+    auths:
       "your.private.registry:5000":
         username: "user"
         password: "password"
-    registryMirrors: # List of registry mirrors to configure on container runtime
-      - "https://mirror.example.com"
-    insecureRegistries: # List of registries to allow insecure (HTTP) access or skip TLS verify
-      - "your.private.registry:5000" # Often needed if private registry uses self-signed certs
+    # Other registry fields like type, namespaceOverride, registryMirrors, insecureRegistries
 
   etcd:
-    type: "kubeadm" # Default. Etcd is stacked on control-plane nodes, managed by kubeadm.
-    # Example for xmcores-managed etcd (binary deployment):
-    # type: "kubexm"
-    # Example for external etcd cluster:
-    # type: "external"
-    # endpoints:
-    #   - "https://etcd1.example.com:2379"
-    #   - "https://etcd2.example.com:2379"
-    #   - "https://etcd3.example.com:2379"
-    # caFile: "/path/to/external/etcd-ca.crt"
-    # certFile: "/path/to/external/etcd-client.crt"
-    # keyFile: "/path/to/external/etcd-client.key"
+    type: "kubeadm" # Options: "kubeadm", "kubexm", "external"
+    # For "external" type, specify:
+    # endpoints: ["https://etcd1:2379"]
+    # caFile: "/path/to/etcd-ca.crt"
+    # certFile: "/path/to/etcd-client.crt"
+    # keyFile: "/path/to/etcd-client.key"
 ```
 
 Key `spec` fields:
-- `hosts`: A list of all machines involved in the cluster, with their SSH details.
-- `roleGroups`: Assigns roles (like `etcd`, `control-plane`, `worker`, `loadbalancer`) to the hosts defined in `spec.hosts`.
-- `controlPlaneEndpoint`: Defines how to access the Kubernetes API server. The `loadbalancer` sub-field configures if and how a load balancer is used for the control plane.
-- `kubernetes`: Kubernetes-specific settings like `version`, `clusterName`, `containerManager`, and installation `type` ("kubeadm" or "kubexm").
-- `network`: CNI plugin configuration (e.g., Calico, Flannel), Pod and Service CIDRs, and optional CNI-specific settings like `blockSize`.
-- `registry`: Optional settings for using private or mirrored container registries, including authentication.
-- `etcd`: Configuration for the etcd cluster.
-    - `type`: Defines the etcd deployment strategy:
-        - `"kubeadm"`: (Default) Etcd is managed by kubeadm and typically stacked on control-plane nodes.
-        - `"kubexm"`: (Future) Etcd cluster to be installed and managed by `xmcores` as separate binaries on hosts in the "etcd" role.
-        - `"external"`: Use a pre-existing, external etcd cluster. Requires specifying `endpoints`, and TLS certificate paths (`caFile`, `certFile`, `keyFile`).
+- `hosts`: A list of all machines involved in the cluster.
+- `roleGroups`: Assigns roles (e.g., `etcd`, `control-plane`, `worker`, `loadbalancer`) to hosts.
+- `controlPlaneEndpoint`: Defines access to the Kubernetes API, including optional load balancer configuration via `loadbalancer.enable` and `loadbalancer.type`.
+- `kubernetes`: Settings like `version`, `clusterName`, `containerManager`, and installation `type` ("kubeadm" or "kubexm").
+- `network`: CNI configuration, CIDRs, and `blockSize`.
+- `registry`: Optional private/mirrored registry settings.
+- `etcd`: Defines etcd deployment: `"kubeadm"` (stacked), `"kubexm"` (xmcores-managed), or `"external"`.
 
-## Development
+## Development - Architectural Overview
 
-(This section can be expanded later with details on how to contribute, build modules, etc.)
+The `xmcores` tool follows a layered architecture to manage cluster operations.
 
-Key architectural components:
-
-- **Configuration (`config/`)**: Handles parsing of the `ClusterConfig` YAML, which defines the desired state of the target cluster.
+- **Configuration (`config/`)**:
+    - The primary configuration is `config.ClusterConfig`, parsed from the user-provided YAML file (e.g., `config.yaml`).
+    - **Loading:** In `main.go`, `config.NewLoader(filePath).Load()` reads and unmarshals the YAML into a raw `*config.ClusterConfig`.
+    - **Defaulting:** `config.SetDefaultClusterSpec()` is then called. This function processes the raw `ClusterConfig.Spec`, applies default values for various fields (e.g., Kubernetes version, network plugin, CIDRs), and resolves host definitions from `Spec.Hosts` into `connector.Host` objects, assigning roles based on `Spec.RoleGroups`.
 
 - **Runtime (`runtime/`)**:
-    - **`KubeRuntime`**: This is the central runtime object created in `main.go` after parsing the `ClusterConfig` and command-line arguments (`CliArgs`). It holds the `ClusterConfig.Spec`, `CliArgs`, processed host/role information (as `connector.Host` objects), a global logger, and operational settings like `WorkDir` and `IgnoreError`. It also manages a cache for SSH connectors to hosts. The `KubeRuntime` is passed to the pipeline's factory/constructor.
-    - The runtime facilitates interaction with target hosts by providing and managing `connector.Connector` instances.
+    - **`CliArgs` (`runtime/cli_args.go`):** A struct holding processed command-line arguments that can influence behavior globally (e.g., `--skip-push-images`, `--artifact`).
+    - **`ClusterRuntime` (`runtime/cluster_runtime.go`):** This is the central runtime object for a given cluster operation.
+        - **Contents:** It holds the defaulted `*config.ClusterSpec` (as `ClusterRuntime.Cluster`), the populated `*CliArgs` (`ClusterRuntime.Arg`), operational parameters like `WorkDir`, `IgnoreErr` (from `CliArgs.IgnoreErr`), `Debug` (from `CliArgs.Debug`), a scoped `logrus.Entry` for logging, and collections of processed `connector.Host` objects (`AllHosts`, `RoleHosts`). It also manages an SSH `ConnectorCache` and a `PipelineCache`.
+        - **Initialization:** An instance of `ClusterRuntime` is created in `main.go` by `runtime.NewClusterRuntime()`, which takes the raw `ClusterConfig`, `CliArgs`, global operational flags, and a base logger. `NewClusterRuntime` itself calls `config.SetDefaultClusterSpec`.
+    - **`BaseRuntime` (`connector/base_runtime.go`):** Embedded by `ClusterRuntime` to provide common functionalities like host list management, role map storage, and connector caching via a `Dialer`.
 
 - **Pipelines (`pipeline/`)**:
-    - Orchestrate high-level operations (e.g., cluster installation, upgrade, deletion).
-    - Pipelines are organized by resource and action (e.g., `pipeline/kubernetes/install.go` for installing Kubernetes).
-    - They are instantiated by a factory that receives the `KubeRuntime`.
-    - Key `pipeline.Pipeline` interface methods:
+    - Orchestrate high-level, end-to-end operations (e.g., "cluster-install").
+    - Reside in packages like `pipeline/kubernetes/`. Example: `install.go` defines the `InstallPipeline`.
+    - **Factory & Registry:** Pipelines are instantiated via factories (`pipeline.PipelineFactory`) of type `func(cr *runtime.ClusterRuntime) (pipeline.Pipeline, error)`. These factories are registered in `pipeline.DefaultRegistry`. `main.go` calls `pipeline.GetPipeline(name, clusterRuntime)` to get an initialized pipeline instance. The factory is responsible for creating the pipeline struct and initializing its modules.
+    - **`pipeline.ConcretePipeline`**: A base struct that can be embedded by concrete pipelines to provide common fields like `NameField`, `DescriptionField`, `Runtime (*krt.ClusterRuntime)`, `Modules ([]module.Module)`, and `ModulePostHooks`. It also provides helper methods for cache management (delegating to `ClusterRuntime`).
+    - **`Pipeline` Interface (`pipeline/interface.go`):**
         - `Name() string`, `Description() string`
-        - `Start(logger *logrus.Entry) error`: The main entry point called by `main.go`. It orchestrates the execution of modules.
-        - `RunModule(mod module.Module) *ending.ModuleResult`: Manages the lifecycle of an individual module.
+        - `Start(logger *logrus.Entry) error`: The main entry point called by `main.go`. It orchestrates the execution of its configured modules.
+        - `RunModule(mod module.Module) *ending.ModuleResult`: Called by `Start()`, this method manages the full lifecycle of an individual module.
 
 - **Modules (`module/`)**:
-    - Implement specific stages or capabilities within a pipeline (e.g., etcd setup, CNI installation, control-plane configuration).
-    - Modules are stateful and follow a rich lifecycle managed by the pipeline (typically via `RunModule`).
-    - Key `module.Module` interface methods:
-        - `Name() string`, `Description() string`
-        - `IsSkip(runtime *krt.KubeRuntime) (bool, error)`: Determines if the module's execution should be skipped based on current state or configuration.
-        - `Default(runtime *krt.KubeRuntime, moduleSpec interface{}, pipelineCache interface{}, moduleCache interface{}) error`: Initializes the module with its runtime context, specific configuration slice (`moduleSpec` type-asserted from `ClusterConfig.Spec`), logger, and caches.
-        - `AutoAssert() error`: Performs pre-run validation and prerequisite checks.
-        - `Init() error`: For the module's internal setup, primarily to assemble its constituent tasks.
-        - `Run(result *ending.ModuleResult)`: Executes the core logic of the module, often by running its tasks. Populates the `ModuleResult`.
-        - `Until(runtime *krt.KubeRuntime) (done bool, err error)`: For modules with asynchronous or long-running operations, indicating completion.
-        - `CallPostHook(res *ending.ModuleResult) error`: Executes any registered post-execution hooks.
-        - `Is() module.Type`: Returns the module type (e.g., `TaskModuleType`, `GoroutineModuleType`), indicating its execution model.
-        - `Slogan() string`: A brief message logged when the module starts.
-        - `AppendPostHook(hookFn module.HookFn)`: Allows adding functions to be called after `Run`.
+    - Implement specific stages or capabilities within a pipeline (e.g., etcd setup, CNI installation).
+    - **`Module` Interface (`module/interface.go`):** Defines a rich lifecycle:
+        - `Name() string`, `Description() string`, `Slogan() string`
+        - `Is() Type`: Returns module type (e.g., `TaskModuleType`, `GoroutineModuleType`).
+        - `IsSkip(runtime *runtime.ClusterRuntime) (bool, error)`: Conditional execution.
+        - `Default(runtime *runtime.ClusterRuntime, moduleSpec interface{}, pipelineCache interface{}, moduleCache interface{}) error`: Receives `ClusterRuntime`, its specific configuration slice (type-asserted from `ClusterConfig.Spec`), and caches. Sets up logger and stores context.
+        - `AutoAssert(runtime *runtime.ClusterRuntime) error`: Prerequisite checks.
+        - `Init() error`: Internal setup, primarily for assembling constituent tasks.
+        - `Run(result *ending.ModuleResult)`: Core logic execution, populates `ModuleResult`.
+        - `Until(runtime *runtime.ClusterRuntime) (bool, error)`: For asynchronous/long-running operations.
+        - `CallPostHook(res *ending.ModuleResult) error`: Executes post-execution hooks.
+        - `AppendPostHook(hookFn module.HookFn)`: Adds a post-execution hook.
 
 - **Tasks (`task/`)**:
-    - Encapsulate a sequence of steps to perform a specific part of a module's work (e.g., generating a certificate, installing a package on a set of hosts).
-    - Tasks also follow a similar lifecycle to modules (`IsSkip`, `Default`, `AutoAssert`, `Init`, `Run`, `Until`, `Slogan`).
-    - `Init()` is where a task assembles its `step.Step` components using `AddStep()`.
-    - `Run()` executes these steps sequentially, managing their outcome and contributing to the parent module's `ModuleResult`.
+    - Represent a sequence of steps to achieve a specific part of a module's work.
+    - **`Task` Interface (`task/interface.go`):** Mirrors the module lifecycle where applicable (`Name`, `Description`, `Slogan`, `IsSkip`, `Default`, `AutoAssert`, `Init`, `Run`, `Until`).
+    - **`BaseTask` (`task/base_task.go`):** Provides a common implementation for `Task`.
+        - `Default()` receives context and `taskSpec` from the parent Module.
+        - `Init()` assembles and initializes `step.Step` instances using `AddStep()`.
+        - `Run()` executes steps sequentially, calling their `Init` (if not already done), `Execute`, and `Post`, and translates outcomes into the `ending.ModuleResult` passed from the module.
+    - `AddStep(s step.Step)` and `Steps() []step.Step` are part of the interface for step management.
 
 - **Steps (`step/`)**:
-    - Smallest units of execution, performing individual atomic actions (e.g., running a single command, copying a file, rendering a template).
-    - Key `step.Step` interface methods:
+    - The smallest, most granular units of execution, performing atomic actions.
+    - **`Step` Interface (`step/interface.go`):**
         - `Name() string`, `Description() string`
-        - `Init(rt runtime.Runtime, logger *logrus.Entry) error`: Initializes the step.
-        - `Execute(rt runtime.Runtime, logger *logrus.Entry) (output string, success bool, err error)`: Performs the action.
-        - `Post(rt runtime.Runtime, logger *logrus.Entry, stepExecuteErr error) error`: For cleanup actions.
-    - Steps are typically executed within a Task's `Run` method.
-
-- **Execution Flow Summary:**
-    1. `main.go` (via Cobra command) parses global flags and the cluster config file path.
-    2. `CliArgs` are populated from flags.
-    3. `config.LoadClusterConfig` parses the YAML into `ClusterConfig`.
-    4. `runtime.NewKubeRuntime` creates the `KubeRuntime` using `ClusterConfig`, `CliArgs`, and global flags.
-    5. The appropriate `pipeline.Pipeline` is retrieved from the registry, passing `KubeRuntime` to its factory. The factory initializes the pipeline and its modules (calling their `Default` and `Init` methods with necessary specs and the `KubeRuntime`).
-    6. `main.go` calls `selectedPipeline.Start(logger)`.
-    7. Pipeline's `Start()` method iterates through its initialized modules, calling `module.IsSkip()`, then `module.Run()`, `module.Until()`, and `module.CallPostHook()`.
-    8. Module's `Run()` method iterates through its initialized tasks, calling their `IsSkip()`, then `task.Run()`, etc.
-    9. Task's `Run()` method (typically from `BaseTask`) executes its sequence of steps (`step.Init()`, `step.Execute()`, `step.Post()`).
-    10. Results and errors are propagated up using `ending.ModuleResult`.
+        - `Init(rt *runtime.ClusterRuntime, logger *logrus.Entry) error`: Prepares the step.
+        - `Execute(rt *runtime.ClusterRuntime, logger *logrus.Entry) (output string, success bool, err error)`: Performs the action.
+        - `Post(rt *runtime.ClusterRuntime, logger *logrus.Entry, stepExecuteErr error) error`: For cleanup.
+    - Example: `runcmd.RunCommandStep` executes shell commands, potentially on `TargetHosts`.
 
 - **Result Handling (`pipeline/ending/result.go`):**
-    - The `ending.ModuleResult` struct (with `Status`, `Message`, `Errors`) is used by module and task `Run` methods to report their outcome. This allows for standardized success/failure/skip reporting and error aggregation.
+    - `ending.ModuleResult` (with `Status`, `Message`, `Errors`) is used by Module and Task `Run` methods for standardized reporting of outcomes (Success, Failed, Skipped, Pending) and error aggregation.
+
+- **Overall Execution Flow:**
+    1. `main.go` (Cobra command) parses flags, including the `-f <config.yaml>` path.
+    2. `CliArgs` struct is populated from command-line flags.
+    3. `config.NewLoader(configFilePath).Load()` parses the YAML into a raw `*config.ClusterConfig`.
+    4. `runtime.NewClusterRuntime(rawCfg, cliArgs, ...)` is called. This constructor:
+        a. Internally calls `config.SetDefaultClusterSpec()` to apply defaults to the spec and process `Spec.Hosts` into `connector.Host` objects with roles assigned.
+        b. Initializes an embedded `connector.BaseRuntime` with core functionalities (dialer, host/role lists, connector cache).
+        c. Returns an initialized `*runtime.ClusterRuntime`.
+    5. `main.go` retrieves the target `pipeline.Pipeline` (e.g., "cluster-install") from the `pipeline.DefaultRegistry` using `pipeline.GetPipeline(pipelineName, clusterRuntime)`. The factory receives the `clusterRuntime` and uses it to create and initialize the pipeline instance, including setting up its modules (calling module `Default` and `Init`).
+    6. `main.go` calls `selectedPipeline.Start(logger)`.
+    7. The pipeline's `Start()` method orchestrates its list of modules. For each module, it calls `pipeline.RunModule(module)`.
+    8. `RunModule()` manages the module's lifecycle: `IsSkip()`, `Default()` (already called by factory), `AutoAssert()`, `Init()` (already called by factory), `Run()`, `Until()`, and `CallPostHook()`.
+    9. A module's `Run()` method, if task-based, manages its tasks' lifecycle similarly (IsSkip, Default, AutoAssert, Init, Run, Until).
+    10. A task's `Run()` method (often via `BaseTask`) executes its sequence of `step.Step`s, calling their `Init()`, `Execute()`, and `Post()` methods.
+    11. Execution status and errors are propagated upwards using `ending.ModuleResult`.
+```

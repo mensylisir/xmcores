@@ -9,38 +9,35 @@ import (
 	"github.com/mensylisir/xmcores/config"
 	"github.com/mensylisir/xmcores/logger"
 	"github.com/mensylisir/xmcores/pipeline"
-	"github.com/mensylisir/xmcores/runtime" // Will use KubeRuntime from here
+	"github.com/mensylisir/xmcores/runtime"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
-	// Ensure pipeline implementations are imported to trigger their init() registration functions.
-	_ "github.com/mensylisir/xmcores/pipeline/kubernetes" // For pipeline registration
+	_ "github.com/mensylisir/xmcores/pipeline/kubernetes"
 )
 
 var (
-	// Global flags for Cobra binding
-	logLevelFlag            string
-	verboseFlag             bool
-	workDirFlag             string
-	ignoreErrorsFlag        bool
-	artifactFlag            string
-	skipPushImagesFlag      bool
-	deployLocalStorageFlag  bool // Bound to cobra bool flag
-	installPackagesFlag     bool
-	skipPullImagesFlag      bool
-	securityEnhancementFlag bool
-	skipInstallAddonsFlag   bool
+	// Global operational flags
+	logLevelFlag     string
+	verboseFlag      bool
+	workDirFlag      string
+	ignoreErrorsFlag bool
 
-	// `create cluster` command specific flag
+	// Flags for runtime.CliArgs
+	artifactFlag               string
+	skipPushImagesFlag         bool
+	deployLocalStorageFlagActual bool
+	installPackagesFlag        bool
+	skipPullImagesFlag         bool
+	securityEnhancementFlag    bool
+	skipInstallAddonsFlag      bool
+
 	clusterConfigFilePath string
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "xm",
 	Short: "xm is a cluster manager CLI tool",
-	Long: `xm (xm_cluster_manager) is a command-line interface tool
-for orchestrating cluster lifecycle management, including creation,
-deletion, and scaling of Kubernetes clusters.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		effectiveLogLevel := "info"
 		userSetLogLevel := cmd.Flags().Changed("log-level")
@@ -48,7 +45,7 @@ deletion, and scaling of Kubernetes clusters.`,
 		if userSetLogLevel && logLevelFlag != "" {
 			effectiveLogLevel = logLevelFlag
 		}
-		if verboseFlag { // verbose overrides others to debug
+		if verboseFlag {
 			effectiveLogLevel = "debug"
 		}
 
@@ -64,14 +61,11 @@ deletion, and scaling of Kubernetes clusters.`,
 	},
 }
 
-var createCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create various resources like clusters",
-}
+var createCmd = &cobra.Command{Use: "create", Short: "Create various resources"}
 
 var createClusterCmd = &cobra.Command{
 	Use:     "cluster",
-	Short:   "Create a Kubernetes cluster using a configuration file",
+	Short:   "Create a Kubernetes cluster",
 	Example: `  xm create cluster -f path/to/your/cluster-config.yaml`,
 	RunE:    runCreateClusterCmd,
 }
@@ -85,53 +79,57 @@ func runCreateClusterCmd(cmd *cobra.Command, args []string) error {
 	}
 	appLog.Infof("Loading cluster configuration from: %s", clusterConfigFilePath)
 
-	clusterCfg, err := config.LoadClusterConfig(clusterConfigFilePath)
+	// 1. Load raw configuration using config.Loader
+	loader := config.NewLoader(clusterConfigFilePath)
+	rawCfg, err := loader.Load()
 	if err != nil {
 		appLog.Errorf("Failed to load cluster configuration: %v", err)
 		return fmt.Errorf("failed to load cluster configuration from '%s': %w", clusterConfigFilePath, err)
 	}
-	appLog.Infof("Successfully loaded configuration for cluster: %s (API: %s, Kind: %s)",
-		clusterCfg.Metadata.Name, clusterCfg.APIVersion, clusterCfg.Kind)
+	appLog.Infof("Successfully loaded raw configuration for cluster: %s (API: %s, Kind: %s)",
+		rawCfg.Metadata.Name, rawCfg.APIVersion, rawCfg.Kind)
 
-	// Populate CliArgs from global flags
-	cliArgs := runtime.NewCliArgs() // Initialize with defaults
+	// 2. Populate CliArgs from global flags
+	cliArgs := runtime.NewCliArgs()
 	cliArgs.Artifact = artifactFlag
 	cliArgs.SkipPushImages = skipPushImagesFlag
-	if cmd.Flags().Changed("deploy-local-storage") {
-		// If the flag was set by the user, deployLocalStorageFlag holds its value (true or false).
-		// We pass the address of this boolean value to the *bool field in CliArgs.
-		cliArgs.DeployLocalStorage = &deployLocalStorageFlag
-	} // If not changed, cliArgs.DeployLocalStorage remains nil (from NewCliArgs)
-	cliArgs.InstallPackages = installPackagesFlag     // Default true from flag/NewCliArgs
+	cliArgs.InstallPackages = installPackagesFlag
 	cliArgs.SkipPullImages = skipPullImagesFlag
 	cliArgs.SecurityEnhancement = securityEnhancementFlag
 	cliArgs.SkipInstallAddons = skipInstallAddonsFlag
+	cliArgs.Debug = verboseFlag
+	cliArgs.IgnoreErr = ignoreErrorsFlag
+
+	if cmd.Flags().Changed("deploy-local-storage") {
+		cliArgs.DeployLocalStorage = &deployLocalStorageFlagActual
+	}
 	appLog.Debugf("Collected CliArgs: %+v", cliArgs)
-	if cliArgs.DeployLocalStorage != nil { // For more explicit logging of the *bool
-		appLog.Debugf("CliArgs.DeployLocalStorage explicitly set to: %v", *cliArgs.DeployLocalStorage)
+	if cliArgs.DeployLocalStorage != nil {
+		appLog.Debugf("CliArgs.DeployLocalStorage explicitly set by user to: %v", *cliArgs.DeployLocalStorage)
 	}
 
-	// Initialize KubeRuntime
-	isVerbose := logger.Log.IsLevelEnabled(logrus.DebugLevel) || logger.Log.IsLevelEnabled(logrus.TraceLevel)
-	kubeRt, err := runtime.NewKubeRuntime(
-		clusterCfg,
+	// 3. Initialize ClusterRuntime
+	// NewClusterRuntime now takes rawCfg and cliArgs (which contains Debug and IgnoreErr internally used by BaseRuntime)
+	// It will internally call SetDefaultClusterSpec.
+	clusterRt, err := runtime.NewClusterRuntime(
+		rawCfg,
 		cliArgs,
-		workDirFlag,
-		ignoreErrorsFlag,
-		isVerbose,
-		logger.Log, // Pass the configured global logger instance
+		workDirFlag, // workDir is still passed directly as it's a global operational param not specific to a single pipeline's "args"
+		logger.Log,
 	)
 	if err != nil {
-		appLog.Errorf("Failed to initialize KubeRuntime: %v", err)
-		return fmt.Errorf("failed to initialize KubeRuntime: %w", err)
+		appLog.Errorf("Failed to initialize ClusterRuntime: %v", err)
+		return fmt.Errorf("failed to initialize ClusterRuntime: %w", err)
 	}
-	appLog.Info("KubeRuntime initialized successfully.")
+	appLog.Info("ClusterRuntime initialized successfully.")
+	// ClusterRuntime now has its own scoped logger: clusterRt.Log
+	// and the defaulted cluster spec: clusterRt.Cluster (*config.ClusterSpec)
 
-	// Pipeline Selection & Instantiation
-	pipelineName := "cluster-install" // This command is hardcoded to run the "cluster-install" pipeline
+	// 4. Pipeline Selection & Instantiation
+	pipelineName := "cluster-install"
 	appLog.Infof("Attempting to get and initialize pipeline: '%s'", pipelineName)
 
-	selectedPipeline, err := pipeline.GetPipeline(pipelineName, kubeRt) // Pass KubeRuntime to factory
+	selectedPipeline, err := pipeline.GetPipeline(pipelineName, clusterRt) // Pass ClusterRuntime
 	if err != nil {
 		availablePipelines := pipeline.GetRegisteredPipelineNames()
 		errMsg := fmt.Sprintf("Failed to get pipeline '%s': %v.", pipelineName, err)
@@ -140,20 +138,20 @@ func runCreateClusterCmd(cmd *cobra.Command, args []string) error {
 		} else {
 			errMsg += " No pipelines are currently registered."
 		}
-		if selectedPipeline == nil { // Check if factory itself failed (e.g. during its internal Init steps)
-			errMsg += " The pipeline factory may have failed during initialization."
+		if selectedPipeline == nil { // Check if factory itself failed
+		    errMsg += " Ensure the pipeline factory for 'cluster-install' is correctly implemented."
 		}
 		appLog.Error(errMsg)
 		return fmt.Errorf(errMsg)
 	}
 	appLog.Infof("Successfully obtained and initialized pipeline: %s (%s)", selectedPipeline.Name(), selectedPipeline.Description())
 
-	// Execute Pipeline using Start() method
-	// The logger for the pipeline execution can be derived from KubeRuntime's logger
-	pipelineExecutionLogger := kubeRt.Log.WithField("pipeline_execution_id", selectedPipeline.Name()) // Example of further scoping
+	// 5. Call Pipeline Start()
+	// The logger for the pipeline execution is taken from ClusterRuntime.Log
+	pipelineExecutionLogger := clusterRt.Log.WithField("pipeline_execution_id", selectedPipeline.Name())
 	appLog.Infof("Starting pipeline execution: %s", selectedPipeline.Name())
 
-	if err = selectedPipeline.Start(pipelineExecutionLogger); err != nil { // Start method takes a logger
+	if err = selectedPipeline.Start(pipelineExecutionLogger); err != nil {
 		appLog.Errorf("Pipeline '%s' execution failed: %v", selectedPipeline.Name(), err)
 		return fmt.Errorf("pipeline '%s' execution failed: %w", selectedPipeline.Name(), err)
 	}
@@ -164,30 +162,22 @@ func runCreateClusterCmd(cmd *cobra.Command, args []string) error {
 }
 
 func init() {
-	// Bind global operational flags
 	rootCmd.PersistentFlags().StringVar(&logLevelFlag, "log-level", "", "Log level (trace, debug, info, warn, error, fatal, panic)")
-	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose (debug) logging (shorthand for --log-level=debug)")
-	rootCmd.PersistentFlags().StringVar(&workDirFlag, "work-dir", "./.xm_work_data", "Working directory for temporary files and operational data")
-	rootCmd.PersistentFlags().BoolVar(&ignoreErrorsFlag, "ignore-errors", false, "Ignore errors in execution where supported")
+	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose (debug) logging (maps to CliArgs.Debug)")
+	rootCmd.PersistentFlags().StringVar(&workDirFlag, "work-dir", "./.xm_work_data", "Working directory")
+	rootCmd.PersistentFlags().BoolVar(&ignoreErrorsFlag, "ignore-errors", false, "Ignore errors in execution (maps to CliArgs.IgnoreErr)")
 
-	// Bind flags for CliArgs to rootCmd persistent flags
 	rootCmd.PersistentFlags().StringVar(&artifactFlag, "artifact", "", "Path to artifact (e.g., offline package tarball)")
 	rootCmd.PersistentFlags().BoolVar(&skipPushImagesFlag, "skip-push-images", false, "Skip pushing images to a private registry")
-	// For deployLocalStorageFlag (which corresponds to *bool CliArgs.DeployLocalStorage):
-	// Default value false. If user specifies --deploy-local-storage, it's true.
-	// If user specifies --deploy-local-storage=false, it's false.
-	// Logic in runCreateClusterCmd checks cmd.Flags().Changed() to set the *bool appropriately.
-	rootCmd.PersistentFlags().BoolVar(&deployLocalStorageFlag, "deploy-local-storage", false, "Deploy local storage provisioner (e.g., OpenEBS LocalPV). If not set, pipeline defaults apply.")
+	rootCmd.PersistentFlags().BoolVar(&deployLocalStorageFlagActual, "deploy-local-storage", false, "Deploy local storage provisioner")
 	rootCmd.PersistentFlags().BoolVar(&installPackagesFlag, "install-packages", true, "Allow installation of OS packages")
 	rootCmd.PersistentFlags().BoolVar(&skipPullImagesFlag, "skip-pull-images", false, "Skip pulling images (assume pre-loaded)")
 	rootCmd.PersistentFlags().BoolVar(&securityEnhancementFlag, "security-enhancement", false, "Apply additional security enhancements")
 	rootCmd.PersistentFlags().BoolVar(&skipInstallAddonsFlag, "skip-install-addons", false, "Skip installing default addons")
 
-	// Add subcommands
 	rootCmd.AddCommand(createCmd)
 	createCmd.AddCommand(createClusterCmd)
 
-	// Flags for createClusterCmd
 	createClusterCmd.Flags().StringVarP(&clusterConfigFilePath, "file", "f", "", "Path to the cluster configuration YAML file (required)")
 	if err := createClusterCmd.MarkFlagRequired("file"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error marking 'file' flag as required: %v\n", err)

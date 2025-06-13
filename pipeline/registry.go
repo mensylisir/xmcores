@@ -3,14 +3,13 @@ package pipeline
 import (
 	"fmt"
 	"sync"
-	"github.com/mensylisir/xmcores/runtime" // For KubeRuntime in factory and GetPipeline
+	"github.com/mensylisir/xmcores/runtime" // For ClusterRuntime
 )
 
-// PipelineFactory is already defined in pipeline/interface.go
-// type PipelineFactory func(kr *runtime.KubeRuntime) (Pipeline, error)
+// PipelineFactory is defined in interface.go (in the same package)
 
 var (
-	DefaultRegistry = make(map[string]PipelineFactory)
+	DefaultRegistry = make(map[string]PipelineFactory) // Uses PipelineFactory from interface.go
 	registryMutex   = &sync.RWMutex{}
 )
 
@@ -28,8 +27,8 @@ func Register(name string, factory PipelineFactory) error {
 }
 
 // GetPipeline retrieves a new pipeline instance from the registry using its factory.
-// It now requires a KubeRuntime to pass to the factory and can return an error from the factory.
-func GetPipeline(name string, kr *runtime.KubeRuntime) (Pipeline, error) {
+// It now requires a ClusterRuntime to pass to the factory and can return an error from the factory.
+func GetPipeline(name string, cr *runtime.ClusterRuntime) (Pipeline, error) { // Parameter changed to ClusterRuntime
 	registryMutex.RLock()
 	defer registryMutex.RUnlock()
 
@@ -37,8 +36,8 @@ func GetPipeline(name string, kr *runtime.KubeRuntime) (Pipeline, error) {
 	if !exists {
 		return nil, fmt.Errorf("pipeline with name '%s' not found in registry", name)
 	}
-	// Call the factory, passing KubeRuntime, and handle potential error from factory.
-	pipelineInstance, err := factory(kr)
+	// Call the factory, passing ClusterRuntime, and handle potential error from factory.
+	pipelineInstance, err := factory(cr) // Pass cr (*runtime.ClusterRuntime)
 	if err != nil {
 		return nil, fmt.Errorf("factory for pipeline '%s' failed: %w", name, err)
 	}

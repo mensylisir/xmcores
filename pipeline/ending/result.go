@@ -5,14 +5,14 @@ import (
 	"strings"
 )
 
-// ModuleResultStatus defines the execution status of a module.
+// ModuleResultStatus defines the execution status of a module or task.
 type ModuleResultStatus int
 
 const (
 	ModuleResultSuccess ModuleResultStatus = iota // Operation completed successfully
 	ModuleResultFailed                            // Operation failed
 	ModuleResultSkipped                           // Operation was skipped
-	ModuleResultPending                           // Operation is pending or in an indeterminate state
+	ModuleResultPending                           // Operation is pending or in an indeterminate state (e.g., for Until loops)
 )
 
 // String returns a string representation of the ModuleResultStatus.
@@ -27,62 +27,62 @@ func (s ModuleResultStatus) String() string {
 	case ModuleResultPending:
 		return "PENDING"
 	default:
-		return fmt.Sprintf("UNKNOWN_STATUS_%d", s)
+		return fmt.Sprintf("UNKNOWN_STATUS_%d (%d)", s, int(s)) // Include numeric value for unknown
 	}
 }
 
-// ModuleResult holds the outcome of a module's execution.
+// ModuleResult holds the outcome of a module's (or task's) execution.
 type ModuleResult struct {
-	Status        ModuleResultStatus
-	Message       string
-	Errors        []error // Changed CombineResult to a slice of errors for more granular error reporting
-	StepResults   []interface{} // Placeholder for potential step-level results if needed
+	Status  ModuleResultStatus
+	Message string
+	Errors  []error // To aggregate multiple errors if they occur
 }
 
-// NewModuleResult creates a new ModuleResult, defaulting to Success.
+// NewModuleResult creates a new ModuleResult, defaulting to Pending.
 func NewModuleResult() *ModuleResult {
 	return &ModuleResult{
-		Status: ModuleResultSuccess, // Default to success
+		Status: ModuleResultPending, // Default to pending; explicit status should be set by the component.
 		Errors: make([]error, 0),
 	}
 }
 
 // IsFailed checks if the module execution is considered failed.
+// A result is failed if its Status is explicitly ModuleResultFailed OR
+// if it has errors and its status is still Pending (meaning it hasn't been explicitly marked Success/Skipped despite errors).
 func (r *ModuleResult) IsFailed() bool {
-	return r.Status == ModuleResultFailed || len(r.Errors) > 0
-}
-
-// SetError marks the module result as failed and records an error.
-// Multiple errors can be added.
-func (r *ModuleResult) SetError(err error, msg ...string) {
-	r.Status = ModuleResultFailed
-	if len(msg) > 0 {
-		if r.Message != "" {
-			r.Message = fmt.Sprintf("%s; %s: %v", r.Message, strings.Join(msg, " "), err)
-		} else {
-			r.Message = fmt.Sprintf("%s: %v", strings.Join(msg, " "), err)
-		}
-	} else if err != nil {
-		if r.Message != "" {
-			r.Message = fmt.Sprintf("%s; error: %v", r.Message, err)
-		} else {
-			r.Message = fmt.Sprintf("error: %v", err)
-		}
+	if r.Status == ModuleResultFailed {
+		return true
 	}
-
-	if err != nil {
-		r.Errors = append(r.Errors, err)
+	// If status is still pending but errors have accumulated, it's effectively failed.
+	if len(r.Errors) > 0 && r.Status == ModuleResultPending {
+		return true
 	}
+	return false
 }
 
 // AddError appends an error to the list of errors.
-// If the module status is not already Failed, this does not automatically set it to Failed,
-// allowing for accumulation of non-critical errors or warnings if needed,
-// but SetError or directly setting Status is preferred for marking failure.
+// It sets the status to ModuleResultFailed if the current status is Pending or Success,
+// as adding an error implies a failure or problem.
 func (r *ModuleResult) AddError(err error) {
-	if err != nil {
-		r.Errors = append(r.Errors, err)
+	if err == nil {
+		return
 	}
+	r.Errors = append(r.Errors, err)
+	if r.Status == ModuleResultPending || r.Status == ModuleResultSuccess {
+		r.Status = ModuleResultFailed
+	}
+}
+
+// SetError is a convenience method to set a primary error message and add the error.
+// This always marks the result as Failed.
+func (r *ModuleResult) SetError(err error, message string) {
+	r.Message = message
+	if err != nil { // Only add non-nil errors to the list
+		r.Errors = append(r.Errors, err)
+	} else if message != "" && len(r.Errors) == 0 { // If no actual error object but message implies one
+		r.Errors = append(r.Errors, fmt.Errorf(message))
+	}
+	r.Status = ModuleResultFailed
 }
 
 // CombinedError returns a single error object that aggregates all recorded errors.
@@ -94,7 +94,6 @@ func (r *ModuleResult) CombinedError() error {
 	if len(r.Errors) == 1 {
 		return r.Errors[0]
 	}
-	// Simple concatenation for now; more sophisticated error joining could be used.
 	var errorStrings []string
 	for _, e := range r.Errors {
 		errorStrings = append(errorStrings, e.Error())
@@ -108,6 +107,19 @@ func (r *ModuleResult) SetStatus(status ModuleResultStatus) {
 }
 
 // SetMessage sets a descriptive message for the result.
-func (r *ModuleResult) SetMessage(msg string) {
-	r.Message = msg
+func (r *ModuleResult) SetMessage(message string) {
+	r.Message = message
+}
+
+// LocalErrResult is a helper to quickly create a ModuleResult from a local error.
+// It sets the status to Failed, uses the error's message, and adds the error.
+func LocalErrResult(err error) *ModuleResult {
+	res := NewModuleResult()
+	if err != nil {
+		res.SetError(err, err.Error())
+	} else {
+		// Should not happen if err is nil, but defensively:
+		res.SetStatus(ModuleResultSuccess) // Or some other appropriate status
+	}
+	return res
 }

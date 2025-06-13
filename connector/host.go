@@ -1,5 +1,15 @@
 package connector
 
+const (
+	RoleControlPlane = "control-plane" // Standardized role name
+	RoleMaster       = "master"        // Often used interchangeably with control-plane
+	RoleWorker       = "worker"
+	RoleEtcd         = "etcd"
+	RoleLoadBalancer = "loadbalancer"
+	RoleK8s          = "k8s" // General Kubernetes node role
+	// Add other common roles as needed
+)
+
 import (
 	"fmt"
 	"strings"
