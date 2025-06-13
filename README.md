@@ -146,11 +146,64 @@ Key `spec` fields:
 (This section can be expanded later with details on how to contribute, build modules, etc.)
 
 Key architectural components:
-- **Pipelines (`pipeline/`)**: Orchestrate high-level operations. Pipelines are organized by resource and action (e.g., `pipeline/kubernetes/install.go` for installing Kubernetes).
-- **Modules (`module/`)**: Implement specific stages within a pipeline (e.g., CNI setup, control plane initialization).
-- **Tasks (`task/`)**: Encapsulate a sequence of steps to perform a specific part of a module's work.
-- **Steps (`step/`)**: Smallest units of execution, performing individual actions (e.g., running a command, copying a file).
-- **Runtime (`runtime/`)**: Manages execution context, including host connections and executors.
-- **Configuration (`config/`)**: Handles parsing of the `ClusterConfig` YAML.
 
-Components like Pipelines, Modules, and Tasks now follow an Init/Execute pattern. The `Init()` phase is responsible for configuration validation, setup, and assembling child components (e.g., a pipeline initializes modules, a module initializes tasks, a task initializes steps). The `Execute()` phase then performs the actual work by invoking its children or executing its own logic.
+- **Configuration (`config/`)**: Handles parsing of the `ClusterConfig` YAML, which defines the desired state of the target cluster.
+
+- **Runtime (`runtime/`)**:
+    - **`KubeRuntime`**: This is the central runtime object created in `main.go` after parsing the `ClusterConfig` and command-line arguments (`CliArgs`). It holds the `ClusterConfig.Spec`, `CliArgs`, processed host/role information (as `connector.Host` objects), a global logger, and operational settings like `WorkDir` and `IgnoreError`. It also manages a cache for SSH connectors to hosts. The `KubeRuntime` is passed to the pipeline's factory/constructor.
+    - The runtime facilitates interaction with target hosts by providing and managing `connector.Connector` instances.
+
+- **Pipelines (`pipeline/`)**:
+    - Orchestrate high-level operations (e.g., cluster installation, upgrade, deletion).
+    - Pipelines are organized by resource and action (e.g., `pipeline/kubernetes/install.go` for installing Kubernetes).
+    - They are instantiated by a factory that receives the `KubeRuntime`.
+    - Key `pipeline.Pipeline` interface methods:
+        - `Name() string`, `Description() string`
+        - `Start(logger *logrus.Entry) error`: The main entry point called by `main.go`. It orchestrates the execution of modules.
+        - `RunModule(mod module.Module) *ending.ModuleResult`: Manages the lifecycle of an individual module.
+
+- **Modules (`module/`)**:
+    - Implement specific stages or capabilities within a pipeline (e.g., etcd setup, CNI installation, control-plane configuration).
+    - Modules are stateful and follow a rich lifecycle managed by the pipeline (typically via `RunModule`).
+    - Key `module.Module` interface methods:
+        - `Name() string`, `Description() string`
+        - `IsSkip(runtime *krt.KubeRuntime) (bool, error)`: Determines if the module's execution should be skipped based on current state or configuration.
+        - `Default(runtime *krt.KubeRuntime, moduleSpec interface{}, pipelineCache interface{}, moduleCache interface{}) error`: Initializes the module with its runtime context, specific configuration slice (`moduleSpec` type-asserted from `ClusterConfig.Spec`), logger, and caches.
+        - `AutoAssert() error`: Performs pre-run validation and prerequisite checks.
+        - `Init() error`: For the module's internal setup, primarily to assemble its constituent tasks.
+        - `Run(result *ending.ModuleResult)`: Executes the core logic of the module, often by running its tasks. Populates the `ModuleResult`.
+        - `Until(runtime *krt.KubeRuntime) (done bool, err error)`: For modules with asynchronous or long-running operations, indicating completion.
+        - `CallPostHook(res *ending.ModuleResult) error`: Executes any registered post-execution hooks.
+        - `Is() module.Type`: Returns the module type (e.g., `TaskModuleType`, `GoroutineModuleType`), indicating its execution model.
+        - `Slogan() string`: A brief message logged when the module starts.
+        - `AppendPostHook(hookFn module.HookFn)`: Allows adding functions to be called after `Run`.
+
+- **Tasks (`task/`)**:
+    - Encapsulate a sequence of steps to perform a specific part of a module's work (e.g., generating a certificate, installing a package on a set of hosts).
+    - Tasks also follow a similar lifecycle to modules (`IsSkip`, `Default`, `AutoAssert`, `Init`, `Run`, `Until`, `Slogan`).
+    - `Init()` is where a task assembles its `step.Step` components using `AddStep()`.
+    - `Run()` executes these steps sequentially, managing their outcome and contributing to the parent module's `ModuleResult`.
+
+- **Steps (`step/`)**:
+    - Smallest units of execution, performing individual atomic actions (e.g., running a single command, copying a file, rendering a template).
+    - Key `step.Step` interface methods:
+        - `Name() string`, `Description() string`
+        - `Init(rt runtime.Runtime, logger *logrus.Entry) error`: Initializes the step.
+        - `Execute(rt runtime.Runtime, logger *logrus.Entry) (output string, success bool, err error)`: Performs the action.
+        - `Post(rt runtime.Runtime, logger *logrus.Entry, stepExecuteErr error) error`: For cleanup actions.
+    - Steps are typically executed within a Task's `Run` method.
+
+- **Execution Flow Summary:**
+    1. `main.go` (via Cobra command) parses global flags and the cluster config file path.
+    2. `CliArgs` are populated from flags.
+    3. `config.LoadClusterConfig` parses the YAML into `ClusterConfig`.
+    4. `runtime.NewKubeRuntime` creates the `KubeRuntime` using `ClusterConfig`, `CliArgs`, and global flags.
+    5. The appropriate `pipeline.Pipeline` is retrieved from the registry, passing `KubeRuntime` to its factory. The factory initializes the pipeline and its modules (calling their `Default` and `Init` methods with necessary specs and the `KubeRuntime`).
+    6. `main.go` calls `selectedPipeline.Start(logger)`.
+    7. Pipeline's `Start()` method iterates through its initialized modules, calling `module.IsSkip()`, then `module.Run()`, `module.Until()`, and `module.CallPostHook()`.
+    8. Module's `Run()` method iterates through its initialized tasks, calling their `IsSkip()`, then `task.Run()`, etc.
+    9. Task's `Run()` method (typically from `BaseTask`) executes its sequence of steps (`step.Init()`, `step.Execute()`, `step.Post()`).
+    10. Results and errors are propagated up using `ending.ModuleResult`.
+
+- **Result Handling (`pipeline/ending/result.go`):**
+    - The `ending.ModuleResult` struct (with `Status`, `Message`, `Errors`) is used by module and task `Run` methods to report their outcome. This allows for standardized success/failure/skip reporting and error aggregation.

@@ -8,30 +8,138 @@ import (
 	"github.com/mensylisir/xmcores/connector"
 	"github.com/mensylisir/xmcores/module"
 	"github.com/mensylisir/xmcores/pipeline"
+	"github.com/mensylisir/xmcores/pipeline/ending" // For ModuleResult in RunModule
 	"github.com/mensylisir/xmcores/runtime"
 	"github.com/sirupsen/logrus"
 
-	// Conceptual module imports - these packages/structs will be created if they don't exist
-	// For now, assume they will have at least the struct and methods to satisfy module.Module
+	// Module imports for instantiation in factory
 	"github.com/mensylisir/xmcores/module/containerruntime"
 	"github.com/mensylisir/xmcores/module/etcd"
-	controlplane "github.com/mensylisir/xmcores/module/kubernetes/controlplane" // Alias to avoid conflict if other 'kubernetes' pkgs are modules
-	"github.com/mensylisir/xmcores/module/kubernetes/worker"                 // Conceptual new worker module
+	controlplane "github.com/mensylisir/xmcores/module/kubernetes/controlplane"
+	"github.com/mensylisir/xmcores/module/kubernetes/worker"
 	"github.com/mensylisir/xmcores/module/loadbalancer"
-	"github.com/mensylisir/xmcores/module/network" // For CNIModule (e.g. CalicoCNIModule)
+	"github.com/mensylisir/xmcores/module/network"
 )
 
 // InstallPipeline defines the structure for the Kubernetes installation pipeline.
 type InstallPipeline struct {
-	logger          *logrus.Entry
-	clusterSpec     *config.ClusterSpec // Store the spec from ClusterConfig
-	pipelineRuntime runtime.Runtime     // Pipeline's own fully initialized runtime
-	modules         []module.Module     // Slice to store initialized modules
+	NameField        string
+	DescriptionField string
+	KubeRuntime      *runtime.KubeRuntime
+	modules          []module.Module
 }
 
 // NewInstallPipelineFactory creates a new instance of InstallPipeline.
-func NewInstallPipelineFactory() pipeline.Pipeline {
-	return &InstallPipeline{}
+// It accepts KubeRuntime and initializes the pipeline with it, including module setup.
+func NewInstallPipelineFactory(kr *runtime.KubeRuntime) (pipeline.Pipeline, error) {
+	if kr == nil {
+		return nil, fmt.Errorf("KubeRuntime cannot be nil for NewInstallPipelineFactory")
+	}
+	if kr.Cluster == nil { // ClusterSpec is within KubeRuntime
+		return nil, fmt.Errorf("KubeRuntime.Cluster (ClusterSpec) cannot be nil")
+	}
+
+	p := &InstallPipeline{
+		NameField:        "cluster-install",
+		DescriptionField: "Installs a Kubernetes cluster based on the ClusterConfig specification.",
+		KubeRuntime:      kr,
+		modules:          make([]module.Module, 0),
+	}
+
+	logger := kr.Log.WithField("pipeline_factory", p.NameField)
+	logger.Info("Initializing modules for InstallPipeline...")
+
+	var currentModule module.Module
+	var err error
+
+	// Load Balancer Module (Conditional)
+	if kr.Cluster.ControlPlaneEndpoint.LoadBalancer.Enable {
+		if kr.Cluster.ControlPlaneEndpoint.LoadBalancer.Type == "haproxy-keepalived" {
+			lbMod := &loadbalancer.HAProxyKeepalivedModule{}
+			currentModule = lbMod
+			if err = currentModule.Init(kr, &kr.Cluster.ControlPlaneEndpoint, logger.WithField("module", currentModule.Name())); err != nil {
+				return nil, fmt.Errorf("factory: failed to init module %s: %w", currentModule.Name(), err)
+			}
+			p.modules = append(p.modules, currentModule)
+			logger.Infof("Factory: Module %s initialized.", currentModule.Name())
+		} else if kr.Cluster.ControlPlaneEndpoint.LoadBalancer.Type == "external" {
+			logger.Info("Factory: External load balancer is configured. Skipping internal LoadBalancerModule.")
+		} else if kr.Cluster.ControlPlaneEndpoint.LoadBalancer.Type != "" { // Non-empty but unknown type
+			logger.Warnf("Factory: Load balancer enabled but type '%s' is unknown or not supported for automatic setup.", kr.Cluster.ControlPlaneEndpoint.LoadBalancer.Type)
+		}
+	} else {
+		logger.Info("Factory: Internal load balancer setup is disabled via config.")
+	}
+
+	// Etcd Module
+	etcdMod := &etcd.EtcdModule{}
+	currentModule = etcdMod
+	if err = currentModule.Init(kr, kr.Cluster.Etcd, logger.WithField("module", currentModule.Name())); err != nil { // Pass EtcdSpec directly
+		return nil, fmt.Errorf("factory: failed to init module %s: %w", currentModule.Name(), err)
+	}
+	p.modules = append(p.modules, currentModule)
+	logger.Infof("Factory: Module %s initialized.", currentModule.Name())
+
+	// Container Runtime Module
+	if kr.Cluster.Kubernetes.ContainerManager == "containerd" {
+		containerdMod := &containerruntime.ContainerdModule{}
+		currentModule = containerdMod
+		if err = currentModule.Init(kr, kr.Cluster.Kubernetes, logger.WithField("module", currentModule.Name())); err != nil { // Pass KubernetesSpec
+			return nil, fmt.Errorf("factory: failed to init module %s: %w", currentModule.Name(), err)
+		}
+		p.modules = append(p.modules, currentModule)
+		logger.Infof("Factory: Module %s initialized.", currentModule.Name())
+	} else {
+		return nil, fmt.Errorf("factory: unsupported container manager: %s", kr.Cluster.Kubernetes.ContainerManager)
+	}
+
+	// Control Plane Module
+	cpMod := &controlplane.ControlPlaneModule{}
+	currentModule = cpMod
+	controlPlaneModuleSpec := controlplane.ControlPlaneModuleSpec{ // Use the defined struct from the module
+		Kubernetes:           *kr.Cluster.Kubernetes,
+		ControlPlaneEndpoint: *kr.Cluster.ControlPlaneEndpoint,
+	}
+	if err = currentModule.Init(kr, &controlPlaneModuleSpec, logger.WithField("module", currentModule.Name())); err != nil {
+		return nil, fmt.Errorf("factory: failed to init module %s: %w", currentModule.Name(), err)
+	}
+	p.modules = append(p.modules, currentModule)
+	logger.Infof("Factory: Module %s initialized.", currentModule.Name())
+
+	// Worker Module
+	workerMod := &worker.WorkerModule{}
+	currentModule = workerMod
+	// Define a spec for worker module if it needs one, e.g. combining Kubernetes and CP Endpoint
+	workerModuleSpec := struct {
+		Kubernetes           config.KubernetesSpec
+		ControlPlaneEndpoint config.ControlPlaneEndpointSpec
+	}{
+		Kubernetes:           *kr.Cluster.Kubernetes,
+		ControlPlaneEndpoint: *kr.Cluster.ControlPlaneEndpoint,
+	}
+	if err = currentModule.Init(kr, &workerModuleSpec, logger.WithField("module", currentModule.Name())); err != nil {
+		return nil, fmt.Errorf("factory: failed to init module %s: %w", currentModule.Name(), err)
+	}
+	p.modules = append(p.modules, currentModule)
+	logger.Infof("Factory: Module %s initialized.", currentModule.Name())
+
+	// CNI Module
+	if kr.Cluster.Network.Plugin == "calico" { // Example: specific module for calico
+		cniMod := &network.CalicoCNIModule{}
+		currentModule = cniMod
+		if err = currentModule.Init(kr, kr.Cluster.Network, logger.WithField("module", currentModule.Name())); err != nil { // Pass NetworkSpec
+			return nil, fmt.Errorf("factory: failed to init module %s: %w", currentModule.Name(), err)
+		}
+		p.modules = append(p.modules, currentModule)
+		logger.Infof("Factory: Module %s initialized.", currentModule.Name())
+	} else if kr.Cluster.Network.Plugin != "" { // Other non-empty plugin specified
+		logger.Warnf("Factory: CNI plugin '%s' is configured but no specific module is available for it in this pipeline. CNI might not be installed.", kr.Cluster.Network.Plugin)
+	} else { // Plugin is empty
+		logger.Info("Factory: No CNI plugin specified. Skipping CNI module.")
+	}
+
+	logger.Info("Factory: InstallPipeline instance created and all modules initialized.")
+	return p, nil
 }
 
 func init() {
@@ -40,253 +148,101 @@ func init() {
 	}
 }
 
-// Name returns the unique name of the pipeline.
 func (p *InstallPipeline) Name() string {
-	return "cluster-install"
+	return p.NameField
 }
 
-// Description provides a human-readable summary of the pipeline.
 func (p *InstallPipeline) Description() string {
-	return "Installs a Kubernetes cluster based on the ClusterConfig specification."
+	return p.DescriptionField
 }
 
-// ExpectedParameters defines the parameters this pipeline expects.
 func (p *InstallPipeline) ExpectedParameters() []pipeline.ParameterDefinition {
-	return nil // ClusterConfig struct is the primary definition
-}
-
-// Init prepares the pipeline for execution.
-func (p *InstallPipeline) Init(cfg *config.ClusterConfig, initialRuntime runtime.Runtime, logger *logrus.Entry) error {
-	p.logger = logger.WithField("pipeline", p.Name())
-	p.logger.Infof("Initializing pipeline for cluster: %s", cfg.Metadata.Name)
-
-	if cfg == nil || cfg.Spec == nil {
-		return fmt.Errorf("ClusterConfig or its Spec is nil")
-	}
-	p.clusterSpec = cfg.Spec // Store the spec
-
-	// Initialize pipelineRuntime
-	pipelineRtCfg := runtime.Config{
-		WorkDir:     initialRuntime.WorkDir(),
-		IgnoreError: initialRuntime.IgnoreError(),
-		Verbose:     initialRuntime.Verbose(),
-		ObjectName:  initialRuntime.ObjectName() + "/" + p.Name(),
-		AllHosts:    make([]connector.Host, 0, len(p.clusterSpec.Hosts)),
-		RoleHosts:   make(map[string][]connector.Host),
-	}
-
-	hostMapByName := make(map[string]connector.Host)
-	p.logger.Infof("Processing %d host definitions from ClusterConfig...", len(p.clusterSpec.Hosts))
-	for i, hostSpec := range p.clusterSpec.Hosts {
-		host := connector.NewHost()
-		host.SetName(hostSpec.Name)
-		host.SetAddress(hostSpec.Address)
-		host.SetInternalAddress(hostSpec.InternalAddress)
-		port := hostSpec.Port
-		if port == 0 {
-			port = 22
-		}
-		host.SetPort(port)
-		host.SetUser(hostSpec.User)
-		host.SetPassword(hostSpec.Password)
-		host.SetPrivateKeyPath(hostSpec.PrivateKeyPath)
-
-		if err := host.Validate(); err != nil {
-			p.logger.Errorf("Host %d ('%s', Address: '%s') validation failed: %v. This host will be skipped.", i+1, hostSpec.Name, hostSpec.Address, err)
-			continue
-		}
-		pipelineRtCfg.AllHosts = append(pipelineRtCfg.AllHosts, host)
-		if host.GetName() != "" {
-			hostMapByName[host.GetName()] = host
-		}
-		p.logger.Debugf("Loaded and validated host: %s (%s)", host.GetName(), host.GetAddress())
-	}
-	p.logger.Infof("Successfully processed %d valid hosts into pipeline runtime config.", len(pipelineRtCfg.AllHosts))
-
-	if p.clusterSpec.RoleGroups != nil {
-		p.logger.Info("Processing roleGroups...")
-		for role, hostNames := range p.clusterSpec.RoleGroups {
-			var hostsInRole []connector.Host
-			for _, hostName := range hostNames {
-				host, found := hostMapByName[hostName]
-				if !found {
-					p.logger.Warnf("Host '%s' defined in role '%s' not found among validated hosts. Skipping for this role.", hostName, role)
-					continue
-				}
-				hostsInRole = append(hostsInRole, host)
-			}
-			if len(hostsInRole) > 0 {
-				pipelineRtCfg.RoleHosts[role] = hostsInRole
-			} else {
-				p.logger.Warnf("No valid hosts found or assigned for role '%s'. This role will be empty.", role)
-			}
-		}
-	}
-	// Log processed roles
-	definedRoles := []string{}
-	for roleName, hostsInRole := range pipelineRtCfg.RoleHosts {
-		definedRoles = append(definedRoles, fmt.Sprintf("%s (%d hosts)", roleName, len(hostsInRole)))
-	}
-	if len(definedRoles) > 0 {
-		p.logger.Infof("Processed roles: %s.", strings.Join(definedRoles, ", "))
-	} else {
-		p.logger.Info("No roles were effectively defined or populated with valid hosts.")
-	}
-
-
-	var err error
-	p.pipelineRuntime, err = runtime.NewRuntime(pipelineRtCfg)
-	if err != nil {
-		return fmt.Errorf("failed to create pipeline-specific runtime: %w", err)
-	}
-	// If runtime needs explicit logger setting: p.pipelineRuntime.SetLog(p.logger.WithField("runtime_scope", "pipeline_operational"))
-	p.logger.Infof("Pipeline runtime initialized. ObjectName: %s. Total hosts: %d. Roles defined: %d.",
-		p.pipelineRuntime.ObjectName(), len(p.pipelineRuntime.AllHosts()), len(p.pipelineRuntime.RoleHosts()))
-
-	// Instantiate and Init Modules
-	p.modules = make([]module.Module, 0)
-	var currentModule module.Module
-
-	// Load Balancer Module (Conditional)
-	if p.clusterSpec.ControlPlaneEndpoint.LoadBalancer.Enable {
-		// Assuming HAProxyKeepalivedModule is the one if type is "haproxy-keepalived" or similar
-		if p.clusterSpec.ControlPlaneEndpoint.LoadBalancer.Type == "haproxy-keepalived" { // Example type check
-			lbMod := &loadbalancer.HAProxyKeepalivedModule{}
-			currentModule = lbMod
-			if err := currentModule.Init(p.pipelineRuntime, &p.clusterSpec.ControlPlaneEndpoint, p.logger.WithField("module", currentModule.Name())); err != nil {
-				return fmt.Errorf("failed to init module %s: %w", currentModule.Name(), err)
-			}
-			p.modules = append(p.modules, currentModule)
-			p.logger.Infof("Module %s initialized.", currentModule.Name())
-		} else if p.clusterSpec.ControlPlaneEndpoint.LoadBalancer.Type == "external" {
-			p.logger.Info("External load balancer is configured. Skipping internal LoadBalancerModule.")
-		} else {
-			p.logger.Warnf("Load balancer enabled but type '%s' is unknown or not supported for automatic setup. Manual setup may be required.", p.clusterSpec.ControlPlaneEndpoint.LoadBalancer.Type)
-		}
-	} else {
-		p.logger.Info("Internal load balancer setup is disabled via config.")
-	}
-
-	// Etcd Module
-	// Conceptual: Select etcd module based on p.clusterSpec.Etcd.Type
-	etcdMod := &etcd.EtcdModule{} // Assuming a generic EtcdModule for now
-	currentModule = etcdMod
-	if err := currentModule.Init(p.pipelineRuntime, &p.clusterSpec.Etcd, p.logger.WithField("module", currentModule.Name())); err != nil {
-		return fmt.Errorf("failed to init module %s: %w", currentModule.Name(), err)
-	}
-	p.modules = append(p.modules, currentModule)
-	p.logger.Infof("Module %s initialized.", currentModule.Name())
-
-	// Container Runtime Module
-	if p.clusterSpec.Kubernetes.ContainerManager == "containerd" {
-		containerdMod := &containerruntime.ContainerdModule{}
-		currentModule = containerdMod
-		// Pass relevant spec: could be KubernetesSpec, or a dedicated ContainerdSpec if it exists in ClusterSpec
-		moduleSpecForCR := &p.clusterSpec.Kubernetes // Or p.clusterSpec.ContainerRuntime if that was the structure
-		if err := currentModule.Init(p.pipelineRuntime, moduleSpecForCR, p.logger.WithField("module", currentModule.Name())); err != nil {
-			return fmt.Errorf("failed to init module %s: %w", currentModule.Name(), err)
-		}
-		p.modules = append(p.modules, currentModule)
-		p.logger.Infof("Module %s initialized.", currentModule.Name())
-	} else {
-		return fmt.Errorf("unsupported container manager: %s", p.clusterSpec.Kubernetes.ContainerManager)
-	}
-
-	// Control Plane Module
-	cpMod := &controlplane.ControlPlaneModule{}
-	currentModule = cpMod
-	// ControlPlaneModule might need KubernetesSpec and ControlPlaneEndpointSpec
-	// Pass a combined struct or handle multiple spec parts within the module if necessary.
-	// For now, passing KubernetesSpec as an example.
-	moduleSpecForCP := struct {
-		Kubernetes           config.KubernetesSpec
-		ControlPlaneEndpoint config.ControlPlaneEndpointSpec
-	}{
-		Kubernetes:           *p.clusterSpec.Kubernetes,
-		ControlPlaneEndpoint: *p.clusterSpec.ControlPlaneEndpoint,
-	}
-	if err := currentModule.Init(p.pipelineRuntime, &moduleSpecForCP, p.logger.WithField("module", currentModule.Name())); err != nil {
-		return fmt.Errorf("failed to init module %s: %w", currentModule.Name(), err)
-	}
-	p.modules = append(p.modules, currentModule)
-	p.logger.Infof("Module %s initialized.", currentModule.Name())
-
-	// Worker Module (Conceptual)
-	// Assuming worker.WorkerModule struct exists
-	workerMod := &worker.WorkerModule{}
-	currentModule = workerMod
-	// Worker module might need KubernetesSpec (for version, etc.) and ControlPlaneEndpoint (to join)
-	moduleSpecForWorker := struct {
-		Kubernetes           config.KubernetesSpec
-		ControlPlaneEndpoint config.ControlPlaneEndpointSpec
-	}{
-		Kubernetes:           *p.clusterSpec.Kubernetes,
-		ControlPlaneEndpoint: *p.clusterSpec.ControlPlaneEndpoint,
-	}
-	if err := currentModule.Init(p.pipelineRuntime, &moduleSpecForWorker, p.logger.WithField("module", currentModule.Name())); err != nil {
-		return fmt.Errorf("failed to init module %s: %w", currentModule.Name(), err)
-	}
-	p.modules = append(p.modules, currentModule)
-	p.logger.Infof("Module %s initialized.", currentModule.Name())
-
-
-	// CNI Module
-	// Conceptual: Select CNI module based on p.clusterSpec.Network.Plugin
-	// For now, assume CalicoCNIModule if plugin is "calico"
-	if p.clusterSpec.Network.Plugin == "calico" {
-		cniMod := &network.CalicoCNIModule{} // Assuming this struct exists in network package
-		currentModule = cniMod
-		if err := currentModule.Init(p.pipelineRuntime, p.clusterSpec.Network, p.logger.WithField("module", currentModule.Name())); err != nil {
-			return fmt.Errorf("failed to init module %s: %w", currentModule.Name(), err)
-		}
-		p.modules = append(p.modules, currentModule)
-		p.logger.Infof("Module %s initialized.", currentModule.Name())
-	} else {
-		p.logger.Warnf("Unsupported CNI plugin or no CNI plugin specified: %s. CNI will not be installed by this pipeline.", p.clusterSpec.Network.Plugin)
-	}
-
-	// Registry Module (Conceptual - if needed as a distinct module)
-	// registryMod := &registry.RegistryModule{} // Assuming a generic registry module
-	// currentModule = registryMod
-	// if err := currentModule.Init(p.pipelineRuntime, &p.clusterSpec.Registry, p.logger.WithField("module", currentModule.Name())); err != nil {
-	// 	return fmt.Errorf("failed to init module %s: %w", currentModule.Name(), err)
-	// }
-	// p.modules = append(p.modules, currentModule)
-	// p.logger.Infof("Module %s initialized.", currentModule.Name())
-
-
-	p.logger.Info("All specified modules initialized successfully.")
 	return nil
 }
 
-// Execute runs the main logic of the pipeline by iterating through its initialized modules.
-func (p *InstallPipeline) Execute(logger *logrus.Entry) error {
-	// Use the pipeline's own logger, which should have been set during Init.
-	// If logger param is preferred, then use that one. For consistency with Module.Execute, let's use param.
-	execLogger := p.logger // Or directly use logger param: execLogger := logger
-	if p.clusterSpec == nil || p.pipelineRuntime == nil || p.modules == nil {
-		return fmt.Errorf("pipeline not initialized properly before Execute. clusterSpec, pipelineRuntime, or modules list is nil")
+func (p *InstallPipeline) Start(logger *logrus.Entry) error {
+	if p.KubeRuntime == nil || p.KubeRuntime.Cluster == nil || p.modules == nil {
+		return fmt.Errorf("pipeline not properly initialized before Start: KubeRuntime, ClusterSpec, or modules list is nil")
 	}
 
-	execLogger.Infof("Executing pipeline for cluster: %s, K8s version: %s",
-		p.clusterSpec.Kubernetes.ClusterName, // Using Kubernetes.ClusterName for user-facing name
-		p.clusterSpec.Kubernetes.Version)
+	pipelineExecLogger := logger // Use the logger passed from main, already scoped from KubeRuntime.Log
+	pipelineExecLogger.Infof("Executing pipeline for cluster: %s, K8s version: %s",
+		p.KubeRuntime.Cluster.Kubernetes.ClusterName,
+		p.KubeRuntime.Cluster.Kubernetes.Version)
 
 	for _, mod := range p.modules {
-		moduleLogger := execLogger.WithField("module", mod.Name())
-		moduleLogger.Infof("Executing module: %s (%s)", mod.Name(), mod.Description())
+		moduleLogger := pipelineExecLogger.WithField("module", mod.Name())
 
-		if err := mod.Execute(moduleLogger); err != nil {
-			moduleLogger.Errorf("Module %s execution failed: %v", mod.Name(), err)
-			if !p.pipelineRuntime.IgnoreError() {
-				return fmt.Errorf("module '%s' execution failed: %w", mod.Name(), err)
+		skip, errSkip := mod.IsSkip(p.KubeRuntime)
+		if errSkip != nil {
+			return fmt.Errorf("error checking IsSkip for module %s: %w", mod.Name(), errSkip)
+		}
+		if skip {
+			moduleLogger.Info("Skipping module execution.")
+			continue
+		}
+
+		// For this iteration, Default & AutoAssert are assumed to be part of module's Init or Run.
+		// The full rich lifecycle (Default, AutoAssert, Init, Run, Until, CallPostHook)
+		// would be managed by a more sophisticated RunModule implementation.
+
+		moduleLogger.Infof("Executing module: %s (%s)", mod.Name(), mod.Description())
+		moduleLogger.Info(mod.Slogan()) // Print slogan before run
+
+		moduleResult := ending.NewModuleResult()
+		mod.Run(moduleResult)
+
+		if errHook := mod.CallPostHook(moduleResult); errHook != nil {
+			moduleLogger.Warnf("Error during post-hook for module %s: %v", mod.Name(), errHook)
+		}
+
+		if moduleResult.IsFailed() {
+			moduleLogger.Errorf("Module %s execution failed: %s. Errors: %v", mod.Name(), moduleResult.Message, moduleResult.CombinedError())
+			if !p.KubeRuntime.IgnoreError {
+				return fmt.Errorf("module '%s' execution failed: %w. Message: %s", mod.Name(), moduleResult.CombinedError(), moduleResult.Message)
 			}
 			moduleLogger.Warnf("Error in module %s ignored due to pipeline IgnoreError setting.", mod.Name())
+		} else if moduleResult.Status == ending.ModuleResultSkipped {
+			moduleLogger.Infof("Module %s was skipped. Message: %s", mod.Name(), moduleResult.Message)
 		} else {
-			moduleLogger.Infof("Module %s completed successfully.", mod.Name())
+			moduleLogger.Infof("Module %s completed successfully. Message: %s", mod.Name(), moduleResult.Message)
 		}
 	}
 
-	execLogger.Infof("Pipeline %s finished execution.", p.Name())
+	pipelineExecLogger.Infof("Pipeline %s finished execution.", p.Name())
 	return nil
+}
+
+func (p *InstallPipeline) RunModule(mod module.Module) *ending.ModuleResult {
+    moduleLogger := p.KubeRuntime.Log.WithFields(logrus.Fields{
+        "pipeline": p.Name(),
+        "module":   mod.Name(),
+        "phase":    "RunModule_direct_call",
+    })
+    moduleLogger.Infof("Directly running module via RunModule: %s (%s)", mod.Name(), mod.Description())
+
+	// This direct RunModule should ideally also respect the full lifecycle for a module.
+	// For now, it's simplified.
+	// It assumes Init was already called for modules stored in p.modules.
+	// If `mod` is an arbitrary module not from p.modules, its Init state is unknown.
+
+	// Call Default, AutoAssert, Init if not already done.
+	// This is complex if module can be Init'd multiple times or if Init relies on order.
+	// For this skeleton, let's assume Init has been handled (e.g., in factory).
+	// if err := mod.Init(p.KubeRuntime, relevantSpec, moduleLogger); err != nil { ... }
+
+    moduleLogger.Info(mod.Slogan())
+    result := ending.NewModuleResult()
+    mod.Run(result)
+
+    if errHook := mod.CallPostHook(result); errHook != nil {
+        moduleLogger.Warnf("Error during post-hook for module %s (direct RunModule call): %v", mod.Name(), errHook)
+    }
+
+    if result.IsFailed() {
+        moduleLogger.Errorf("Module %s (direct RunModule call) failed: %s. Errors: %v", mod.Name(), result.Message, result.CombinedError())
+    } else {
+        moduleLogger.Infof("Module %s (direct RunModule call) completed with status: %s. Message: %s", mod.Name(), result.Status, result.Message)
+    }
+    return result
 }

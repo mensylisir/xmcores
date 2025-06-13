@@ -4,8 +4,9 @@ import (
 	"fmt"
 
 	"github.com/mensylisir/xmcores/config"
-	"github.com/mensylisir/xmcores/runtime"
-	"github.com/mensylisir/xmcores/step/runcmd" // For placeholder steps
+	"github.com/mensylisir/xmcores/pipeline/ending" // Though Run is inherited, good to keep for context
+	krt "github.com/mensylisir/xmcores/runtime"
+	"github.com/mensylisir/xmcores/step/runcmd"
 	"github.com/mensylisir/xmcores/task"
 	"github.com/sirupsen/logrus"
 )
@@ -13,59 +14,68 @@ import (
 // GenerateCertsTask is responsible for generating etcd certificates.
 type GenerateCertsTask struct {
 	task.BaseTask
-	// spec *config.EtcdSpec // Store the typed spec if needed by Execute directly
+	// TaskSpec is inherited from BaseTask, will be asserted to *config.EtcdSpec
 }
 
 // NewGenerateCertsTask creates a new GenerateCertsTask.
 func NewGenerateCertsTask() task.Task {
-	return &GenerateCertsTask{
-		BaseTask: task.NewBaseTask("etcd-generate-certs", "Generates etcd CA and node certificates."),
-	}
+	t := &GenerateCertsTask{}
+	t.NameField = "etcd-generate-certs"
+	t.DescriptionField = "Generates etcd CA and node certificates."
+	t.BaseTask = task.NewBaseTask(t.NameField, t.DescriptionField) // Initialize BaseTask parts
+	return t
 }
 
-// Init initializes the GenerateCertsTask.
-// taskSpec is expected to be *config.EtcdSpec or a more specific cert generation config.
-func (t *GenerateCertsTask) Init(moduleRuntime runtime.Runtime, taskSpec interface{}, logger *logrus.Entry) error {
-	if err := t.BaseTask.Init(moduleRuntime, taskSpec, logger); err != nil {
+// Default stores runtime, logger, and the taskSpec.
+func (t *GenerateCertsTask) Default(runtime *krt.KubeRuntime, taskSpec interface{}, moduleCache interface{}, taskCache interface{}) error {
+	if err := t.BaseTask.Default(runtime, taskSpec, moduleCache, taskCache); err != nil {
 		return err
 	}
+	t.Logger = runtime.Log.WithFields(logrus.Fields{"task": t.Name(), "type": "GenerateCertsTask"})
 
-	etcdSpec, ok := taskSpec.(*config.EtcdSpec)
-	if !ok {
-		return fmt.Errorf("invalid taskSpec type for %s: expected *config.EtcdSpec, got %T", t.Name(), taskSpec)
+	// Type assert and store taskSpec for use in Init and other methods
+	// The TaskSpec field in BaseTask is interface{}, so we store it there.
+	// No need for a separate field in GenerateCertsTask unless we want to avoid re-assertion.
+	if _, ok := t.TaskSpec.(*config.EtcdSpec); !ok {
+		return fmt.Errorf("invalid taskSpec type for %s: expected *config.EtcdSpec, got %T", t.Name(), t.TaskSpec)
 	}
-	// t.spec = etcdSpec // Store if Execute needs it directly
 
-	t.BaseTask.logger.Infof("Initializing GenerateCertsTask with Etcd type: %s", etcdSpec.Type)
+	t.Logger.Info("GenerateCertsTask Default completed.")
+	return nil
+}
+
+// Init initializes the GenerateCertsTask by creating necessary steps.
+func (t *GenerateCertsTask) Init() error {
+	if err := t.BaseTask.Init(); err != nil {
+		return err
+	}
+	t.Logger.Info("GenerateCertsTask Init called - assembling steps.")
+
+	if t.TaskSpec == nil {
+        return fmt.Errorf("taskSpec not set for %s (must be set in Default method)", t.Name())
+    }
+	etcdSpec, ok := t.TaskSpec.(*config.EtcdSpec)
+	if !ok {
+		return fmt.Errorf("taskSpec for %s is not of type *config.EtcdSpec (type: %T)", t.Name(), t.TaskSpec)
+	}
+
 	if etcdSpec.Type == "external" {
-		t.BaseTask.logger.Info("Etcd type is external, assuming certificates are user-provided. No cert generation steps will be added by this task.")
-		// For external etcd, certs are provided by the user (caFile, certFile, keyFile).
-		// This task might validate their existence if paths are absolute or resolvable.
+		t.Logger.Info("Etcd type is external, assuming certificates are user-provided. No cert generation steps will be added.")
 		return nil
 	}
 
-	// Conceptual steps for generating certs (e.g., for kubeadm or xm type etcd)
-	// These would typically not run on remote hosts directly but on a control/admin machine,
-	// or use cfssl/easyrsa local tools.
-	// For now, using placeholder RunCommandSteps that would echo their intent.
+	t.Logger.Infof("Initializing certificate generation steps for etcd type: %s", etcdSpec.Type)
 
-	// Placeholder for creating CA
-	// In reality, this step would use a crypto library or call a local script.
-	// The runtime for these steps might be a "localhost" runtime.
-	// For simplicity, these echo commands don't need a specific runtime target for now.
 	caCmdStep := runcmd.NewRunCommandStep("GenerateEtcdCA", "Generates ETCD CA", "echo TODO: Generate ETCD CA certificate and key")
-	stepLoggerCA := t.BaseTask.logger.WithField("step_name", caCmdStep.Name())
-	if err := caCmdStep.Init(t.BaseTask.runtime, stepLoggerCA); err != nil { // Using runtime from BaseTask
+	stepLoggerCA := t.Logger.WithField("step", caCmdStep.Name())
+	if err := caCmdStep.Init(t.Runtime, stepLoggerCA); err != nil {
 		return fmt.Errorf("failed to init step '%s': %w", caCmdStep.Name(), err)
 	}
 	t.AddStep(caCmdStep)
-	t.BaseTask.logger.Debugf("Added step: %s", caCmdStep.Name())
+	t.Logger.Debugf("Added step: %s", caCmdStep.Name())
 
-	// Placeholder for creating node certificates for each etcd host
-	// This would iterate over hosts in the "etcd" role.
-	etcdHosts := t.BaseTask.runtime.RoleHosts()["etcd"]
-	if len(etcdHosts) == 0 && etcdSpec.Type != "external" {
-		 // If not external, we need etcd hosts to generate certs for.
+	etcdHosts := t.Runtime.RoleHosts()["etcd"]
+	if len(etcdHosts) == 0 && (etcdSpec.Type == "kubeadm" || etcdSpec.Type == "kubexm") {
 		return fmt.Errorf("no hosts found in 'etcd' role for certificate generation (etcd type: %s)", etcdSpec.Type)
 	}
 
@@ -76,17 +86,23 @@ func (t *GenerateCertsTask) Init(moduleRuntime runtime.Runtime, taskSpec interfa
 			fmt.Sprintf("Generates ETCD certificate for node %s", host.GetName()),
 			nodeCertCmd,
 		)
-		stepLoggerNode := t.BaseTask.logger.WithField("step_name", nodeCertStep.Name())
-		if err := nodeCertStep.Init(t.BaseTask.runtime, stepLoggerNode); err != nil {
+		stepLoggerNode := t.Logger.WithField("step", nodeCertStep.Name())
+		if err := nodeCertStep.Init(t.Runtime, stepLoggerNode); err != nil {
 			return fmt.Errorf("failed to init step '%s': %w", nodeCertStep.Name(), err)
 		}
 		t.AddStep(nodeCertStep)
-		t.BaseTask.logger.Debugf("Added step: %s", nodeCertStep.Name())
+		t.Logger.Debugf("Added step: %s", nodeCertStep.Name())
 	}
 
-	t.BaseTask.logger.Info("GenerateCertsTask initialized with certificate generation steps.")
+	t.Logger.Info("GenerateCertsTask initialized with certificate generation steps.")
 	return nil
 }
 
-// Execute method is inherited from BaseTask.
-// var _ task.Task = (*GenerateCertsTask)(nil) // Ensured by BaseTask embedding.
+// Slogan provides a specific slogan for GenerateCertsTask.
+func (t *GenerateCertsTask) Slogan() string {
+	return fmt.Sprintf("Generating ETCD certificates for type: %s...", t.TaskSpec.(*config.EtcdSpec).Type)
+}
+
+// Run, IsSkip, AutoAssert, Until, Steps are inherited from BaseTask.
+// Override if specific behavior is needed.
+var _ task.Task = (*GenerateCertsTask)(nil)

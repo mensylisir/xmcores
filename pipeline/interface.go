@@ -1,8 +1,9 @@
 package pipeline
 
 import (
-	"github.com/mensylisir/xmcores/config" // For ClusterConfig
-	"github.com/mensylisir/xmcores/runtime"
+	"github.com/mensylisir/xmcores/module"
+	"github.com/mensylisir/xmcores/pipeline/ending"
+	"github.com/mensylisir/xmcores/runtime" // For KubeRuntime in PipelineFactory
 	"github.com/sirupsen/logrus"
 )
 
@@ -18,7 +19,6 @@ const (
 )
 
 // ParameterDefinition describes an expected parameter for a pipeline.
-// This might be used for CLI help generation or documentation, even if ClusterConfig is primary.
 type ParameterDefinition struct {
 	Name         string        `json:"name" yaml:"name"`
 	Type         ParameterType `json:"type" yaml:"type"`
@@ -27,28 +27,22 @@ type ParameterDefinition struct {
 	DefaultValue interface{}   `json:"defaultValue,omitempty" yaml:"defaultValue,omitempty"`
 }
 
-// Pipeline represents a high-level workflow.
+// PipelineFactory defines the function signature for creating pipeline instances.
+// It now accepts KubeRuntime to allow pipelines to be initialized with their specific runtime context and config.
+type PipelineFactory func(kr *runtime.KubeRuntime) (Pipeline, error)
+
+// Pipeline represents a high-level workflow that orchestrates a series of modules.
 type Pipeline interface {
-	// Name returns the unique name of the pipeline.
 	Name() string
-
-	// Description provides a human-readable summary of what the pipeline does.
 	Description() string
+	ExpectedParameters() []ParameterDefinition // For documentation or CLI help
 
-	// ExpectedParameters returns a list of parameter definitions that this pipeline expects as input.
-	// This can be used for documentation, CLI help, or preliminary validation.
-	// It can return nil if parameters are solely defined by a typed config struct.
-	ExpectedParameters() []pipeline.ParameterDefinition // Retained for now
+	// Start begins the pipeline execution.
+	// The pipeline instance should have been fully initialized by its factory, including its KubeRuntime.
+	// logger: A logger entry scoped for this pipeline execution.
+	Start(logger *logrus.Entry) error
 
-	// Init prepares the pipeline for execution using the loaded ClusterConfig and initial runtime settings.
-	// It should validate parameters and can set up an operational runtime for the pipeline.
-	// - cfg: The fully parsed cluster configuration.
-	// - initialRuntime: Provides access to global settings like WorkDir, IgnoreError, Verbose, and the base logger.
-	// - logger: A logger entry pre-configured for this pipeline.
-	Init(cfg *config.ClusterConfig, initialRuntime runtime.Runtime, logger *logrus.Entry) error
-
-	// Execute runs the main logic of the pipeline.
-	// It should use the operational runtime and configurations prepared during Init.
-	// - logger: A logger entry pre-configured for this pipeline's execution phase.
-	Execute(logger *logrus.Entry) error
+	// RunModule executes a single module within the pipeline's context.
+	// This method is typically called by the pipeline's own orchestration logic (e.g., within Start).
+	RunModule(mod module.Module) *ending.ModuleResult
 }
